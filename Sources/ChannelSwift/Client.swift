@@ -140,10 +140,7 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
   }
   
   public func start() {
-    guard let url = URL(string: address) else {
-      print("Invalid WebSocket URL")
-      return
-    }
+    guard let url = URL(string: address) else { return }
     
     var request = URLRequest(url: url)
     if let headerProvider = headers {
@@ -167,7 +164,6 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
       case .success(let message):
         switch message {
         case .string(let text):
-          print("<", text)
           guard let data = text.data(using: .utf8) else { return }
           do {
             let array = try JSONDecoder().decode(DecodableArray<ReceivedResponse>.self, from: data).array
@@ -181,15 +177,12 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
         // Continue receiving messages
         self.receiveMessage()
       case .failure(let error):
-        print("[stream] disconnected")
-        print("WebSocket receive error: \(error)")
         self.handleDisconnection()
       }
     }
   }
   
   private func handleDisconnection() {
-    print("[stream] handleDisconnection")
     isConnected = false
     webSocket = nil
     
@@ -203,7 +196,6 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
   }
   
   public func stop() {
-    print("[stream] stop")
     pending.removeAll()
     webSocket?.cancel(with: .goingAway, reason: nil)
     reconnectTimer?.invalidate()
@@ -256,7 +248,6 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
     guard isConnected else { return }
     guard let webSocket else { return }
     guard let string = try? String(data: JSONEncoder().encode(encodable), encoding: .utf8) else { return }
-    print(">", string)
     webSocket.send(.string(string)) { _ in }
   }
   

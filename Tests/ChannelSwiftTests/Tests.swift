@@ -57,11 +57,9 @@ class ClientTests: XCTestCase {
   func testStreamCancel() async throws {
     var a = 0
     for try await value in client.values("stream/cancel", as: Int.self) {
-      print("[stream] received", value)
       XCTAssertEqual(value, a)
       a += 1
       if a == 2 {
-        print("[stream] break")
         break
       }
     }
