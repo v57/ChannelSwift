@@ -3,23 +3,10 @@
 
 import PackageDescription
 
+let name = "ChannelSwift"
 let package = Package(
-    name: "ChannelSwift",
-    platforms: [.macOS(.v10_15)],
-    products: [
-        // Products define the executables and libraries a package produces, making them visible to other packages.
-        .library(
-            name: "ChannelSwift",
-            targets: ["ChannelSwift"]),
-    ],
-    targets: [
-        // Targets are the basic building blocks of a package, defining a module or a test suite.
-        // Targets can depend on other targets in this package and products from dependencies.
-        .target(
-            name: "ChannelSwift"),
-        .testTarget(
-            name: "ChannelSwiftTests",
-            dependencies: ["ChannelSwift"]
-        ),
-    ]
+  name: name,
+  platforms: [.macOS(.v10_15)],
+  products: [.library(name: name, targets: [name])],
+  targets: [.target(name: name), .testTarget(name: "ChannelSwiftTests", dependencies: ["ChannelSwift"])]
 )
