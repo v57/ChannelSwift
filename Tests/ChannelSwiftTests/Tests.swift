@@ -114,7 +114,7 @@ class ClientTests: XCTestCase {
       try await newClient.send("auth/name")
       XCTFail("Expected to throw an error")
     } catch {
-      XCTAssertTrue(error.localizedDescription.contains("unauthorized"))
+      XCTAssertTrue("\(error)".contains("unauthorized"))
     }
     newClient.stop()
   }

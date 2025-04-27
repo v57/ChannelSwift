@@ -136,8 +136,10 @@ public struct ReceivedResponse: Decodable, @unchecked Sendable {
     self.error = try container.decodeIfPresent(String.self, forKey: .error)
   }
 }
-public struct ChannelError: Error, Codable, Sendable {
+public struct ChannelError: Error, CustomStringConvertible, Codable, Sendable {
   public let text: String
+  public var localizedDescription: String { text }
+  public var description: String { text }
   public init(text: String) {
     self.text = text
   }
