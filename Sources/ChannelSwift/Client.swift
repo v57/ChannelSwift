@@ -176,7 +176,7 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
         
         // Continue receiving messages
         self.receiveMessage()
-      case .failure(let error):
+      case .failure:
         self.handleDisconnection()
       }
     }

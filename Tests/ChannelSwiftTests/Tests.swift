@@ -1,4 +1,4 @@
-import XCTest
+import Testing
 @testable import ChannelSwift
 
 func sleep(seconds: Double = 0.001) async {
@@ -28,92 +28,101 @@ let channel = Channel<Void>()
 
 let client = channel.connect(address: "2049", state: ())
 
-class ClientTests: XCTestCase {
-  func testPostHello() async throws {
-    let response: String = try await client.send("hello")
-    XCTAssertEqual(response, "world")
-  }
+@Test("hello")
+func hello() async throws {
+  let response: String = try await client.send("hello")
+  #expect(response == "world")
+}
 
-  func testPostEcho() async throws {
-    let random = Double.random(in: 0..<1)
-    let response: Double = try await client.send("echo", body: random)
-    XCTAssertEqual(response, random)
-  }
+@Test("echo")
+func echo() async throws {
+  let random = Double.random(in: 0..<1)
+  let response: Double = try await client.send("echo", body: random)
+  #expect(response == random)
+}
 
-  func testPostNoReturn() async throws {
-    let response: Int? = try await client.send("empty")
-    XCTAssertNil(response)
-  }
+@Test("empty")
+func noReturn() async throws {
+  let response: Int? = try await client.send("empty")
+  #expect(response == nil)
+}
 
-  func testStream() async throws {
-    var a = 0
-    for try await value in client.values("stream/values", as: Int.self) {
-      XCTAssertEqual(value, a)
-      a += 1
-    }
-    XCTAssertEqual(a, 3)
+@Test("stream/values")
+func stream() async throws {
+  var a = 0
+  for try await value in client.values("stream/values", as: Int.self) {
+    #expect(value == a)
+    a += 1
   }
+  #expect(a == 3)
+}
 
-  func testStreamCancel() async throws {
-    var a = 0
-    for try await value in client.values("stream/cancel", as: Int.self) {
-      XCTAssertEqual(value, a)
-      a += 1
-      if a == 2 {
-        break
-      }
-    }
-    XCTAssertEqual(a, 2)
-  }
-
-  func testServerPost() async throws {
-    let response: String = try await client.send("mirror")
-    XCTAssertEqual(response, "client world")
-  }
-
-  func testServerStream() async throws {
-    var a = 0
-    for try await value in client.values("mirror/stream", as: Int.self) {
-      XCTAssertEqual(value, a)
-      a += 1
+@Test("stream/cancel")
+func streamCancel() async throws {
+  var a = 0
+  for try await value in client.values("stream/cancel", as: Int.self) {
+    #expect(value == a)
+    a += 1
+    if a == 2 {
+      break
     }
   }
+  #expect(a == 2)
+}
 
-  func testServerStreamCancel() async throws {
-    var a = 0
-    await MainActor.run {
-      valuesSent = 0
-    }
-    for try await value in client.values("mirror/stream/cancel", as: Int.self) {
-      XCTAssertEqual(value, a)
-      a += 1
-      if a == 2 { break }
-    }
-    // Allow some time for the server to process the cancellation
-    await sleep(seconds: 0.1)
-    await MainActor.run {
-      XCTAssertEqual(valuesSent, 2)
-    }
-  }
+@Test("mirror")
+func serverPost() async throws {
+  let response: String = try await client.send("mirror")
+  #expect(response == "client world")
+}
 
-  func testStateAuth() async throws {
-    let newClient = Channel<Void>().connect(address: "2049")
-    try await newClient.send("auth", body: ["name": "tester"])
-    let name: String = try await newClient.send("auth/name")
-    XCTAssertEqual(name, "tester")
-    newClient.stop()
-  }
-
-  func testStateUnauthorized() async throws {
-    let newClient = Channel<Void>().connect(address: "2049")
-
-    // Test that unauthorized request throws an error
-    do {
-      try await newClient.send("auth/name")
-      XCTFail("Expected to throw an error")
-    } catch {
-      XCTAssertTrue("\(error)".contains("unauthorized"))
-    }
-    newClient.stop()
+@Test("mirror/stream")
+func serverStream() async throws {
+  var a = 0
+  for try await value in client.values("mirror/stream", as: Int.self) {
+    #expect(value == a)
+    a += 1
   }
 }
+
+@Test("mirror/stream/cancel")
+func serverStreamCancel() async throws {
+  var a = 0
+  await MainActor.run {
+    valuesSent = 0
+  }
+  for try await value in client.values("mirror/stream/cancel", as: Int.self) {
+    #expect(value == a)
+    a += 1
+    if a == 2 { break }
+  }
+  // Allow some time for the server to process the cancellation
+  await sleep(seconds: 0.1)
+  await MainActor.run {
+    #expect(valuesSent == 2)
+  }
+}
+
+@Test("auth/name")
+func stateAuth() async throws {
+  let newClient = Channel<Void>().connect(address: "2049")
+  try await newClient.send("auth", body: ["name": "tester"])
+  let name: String = try await newClient.send("auth/name")
+  #expect(name == "tester")
+  newClient.stop()
+}
+
+@Test("auth/name/failed")
+func unauthorized() async throws {
+  let newClient = Channel<Void>().connect(address: "2049")
+
+  // Test that unauthorized request throws an error
+  do {
+    try await newClient.send("auth/name")
+    #expect(Bool(false), "Expected to throw an error")
+  } catch {
+    #expect("\(error)".contains("unauthorized"))
+  }
+  newClient.stop()
+}
+
