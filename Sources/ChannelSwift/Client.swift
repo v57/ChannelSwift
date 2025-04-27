@@ -16,8 +16,8 @@ extension Channel {
   public func connect(address: String, state: State, options: ClientOptions<State> = ClientOptions()) -> ClientSender<State> {
     let ch = self
     let wsAddress = address.starts(with: "ws") ? address : "ws://localhost:\(address)"
-    let ws = WebSocketTopics(address: wsAddress, headers: options.headers)
-    var topics = Set<String>()
+    let ws = WebSocketClient(address: wsAddress, headers: options.headers)
+    let topics = UnsafeMutable(Set<String>())
     let sender = ChannelSender(ch: ch, connection: ws)
     
     // Setup connection callbacks
@@ -35,10 +35,10 @@ extension Channel {
           ws.notify(body)
         },
         subscribe: { topic in
-          topics.insert(topic)
+          topics.value.insert(topic)
         },
         unsubscribe: { topic in
-          topics.remove(topic)
+          topics.value.remove(topic)
         },
         event: { topic, body in
           ws.receivedEvent(topic: topic, body: body)
@@ -63,11 +63,11 @@ extension Channel {
 
 // MARK: - ClientOptions
 
-public struct ClientOptions<State> {
+public struct ClientOptions<State: Sendable> {
   public var headers: (() -> [String: String])?
-  public var onConnect: ((ChannelSender<State>) async throws -> Void)?
+  public var onConnect: (@Sendable (ChannelSender<State>) async throws -> Void)?
   
-  public init(headers: (() -> [String: String])? = nil, onConnect: ((ChannelSender<State>) async throws -> Void)? = nil) {
+  public init(headers: (() -> [String: String])? = nil, onConnect: (@Sendable (ChannelSender<State>) async throws -> Void)? = nil) {
     self.headers = headers
     self.onConnect = onConnect
   }
@@ -75,7 +75,7 @@ public struct ClientOptions<State> {
 
 // MARK: - ClientSender
 
-public struct ClientSender<State>: ProxySender {
+public struct ClientSender<State: Sendable>: ProxySender {
   public let sender: ChannelSender<State>
   public let ws: WebSocketClient
   
@@ -87,7 +87,7 @@ public struct ClientSender<State>: ProxySender {
 
 // MARK: - ChannelController
 
-private struct ChannelController<State>: Controller {
+private struct ChannelController<State: Sendable>: Controller {
   func respond(_ response: Encodable) {
     self.respond(response)
   }
@@ -104,16 +104,16 @@ private struct ChannelController<State>: Controller {
     self.event(topic, event)
   }
   
-  var respond: (Encodable) -> Void
-  var subscribe: (String) -> Void
-  var unsubscribe: (String) -> Void
-  var event: (String, AnyBody) -> Void
-  var sender: any Sender
-  var state: State
+  let respond: @Sendable (Encodable) -> Void
+  let subscribe: @Sendable (String) -> Void
+  let unsubscribe: @Sendable (String) -> Void
+  let event: @Sendable (String, AnyBody) -> Void
+  let sender: any Sender
+  let state: State
 }
 
 // MARK: - WebSocketClient
-public class WebSocketClient: NSObject, URLSessionWebSocketDelegate {
+public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, ConnectionInterface, @unchecked Sendable {
   private var id: Int = 0
   private let address: String
   private var webSocket: URLSessionWebSocketTask?
@@ -305,14 +305,10 @@ public class WebSocketClient: NSObject, URLSessionWebSocketDelegate {
       try container.encode(body)
     }
   }
-}
-
-// MARK: Events
-public class WebSocketTopics: WebSocketClient, ConnectionInterface {
   private var subscribed = [String: [Int: (AnyBody) -> Void]]()
   private var nextEventId = 0
   
-  public func addTopic(topic: String, event: @escaping (AnyBody) -> Void) -> () -> Bool {
+  public func addTopic(topic: String, event: @escaping (AnyBody) -> Void) -> @Sendable () -> Bool {
     let id = nextEventId
     nextEventId += 1
     
