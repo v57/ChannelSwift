@@ -7,28 +7,20 @@ func sleep(seconds: Double = 0.001) async {
 var valuesSent = 0
 let channel = Channel<Void>()
   .post("hello") { "client world" }
-  .stream("stream/values") { _, _ in
-    return AsyncThrowingStream { continuation in
-      Task {
-        for i in 0..<3 {
-          continuation.yield(i)
-          await sleep()
-        }
-        continuation.finish()
-      }
+  .stream("stream/values") { c in
+    for i in 0..<3 {
+      c.yield(i)
+      await sleep()
     }
+    c.finish()
   }
-  .stream("stream/cancel") { _, _ in
-    return AsyncThrowingStream { continuation in
-      Task {
-        for i in 0..<10 {
-          continuation.yield(i)
-          valuesSent += 1
-          await sleep(seconds: 0.2)
-        }
-        continuation.finish()
-      }
+  .stream("stream/cancel") { c in
+    for i in 0..<10 {
+      c.yield(i)
+      valuesSent += 1
+      await sleep(seconds: 0.2)
     }
+    c.finish()
   }
 
 let client = channel.connect(address: "2049", state: ())

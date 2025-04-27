@@ -219,11 +219,42 @@ public class Channel<State> {
   
   
   public func postOther(_ path: @escaping (String) -> Bool, request: @escaping Function<State>) -> Self {
-    self.otherPostApi.append((path: path, request: request))
+    otherPostApi.append((path: path, request: request))
     return self
   }
-  public func stream(_ path: String, request: @escaping Stream<State>) -> Self {
-    self.streamApi[path] = request
+  public func stream<Input: Decodable>(_ path: String, request: @escaping (Body<Input, State>, AsyncThrowingStream<Encodable, Error>.Continuation) async throws -> Void) -> Self {
+    streamApi[path] = { body, _ in
+      AsyncThrowingStream { continuation in
+        Task {
+          do {
+            try await request(Body(body: body.body.body(), sender: body.sender, state: body.state), continuation)
+            continuation.finish()
+          } catch {
+            continuation.finish(throwing: error)
+          }
+        }
+      }
+    }
+    return self
+  }
+  public func stream<Input: Decodable>(_ path: String, request: @escaping (Input, AsyncThrowingStream<Encodable, Error>.Continuation) async throws -> Void) -> Self {
+    stream(path) { body, continuation in
+      try await request(body.body, continuation)
+    }
+  }
+  public func stream(_ path: String, request: @escaping (AsyncThrowingStream<Encodable, Error>.Continuation) async throws -> Void) -> Self {
+    streamApi[path] = { body, _ in
+      AsyncThrowingStream { continuation in
+        Task {
+          do {
+            try await request(continuation)
+            continuation.finish()
+          } catch {
+            continuation.finish(throwing: error)
+          }
+        }
+      }
+    }
     return self
   }
   
