@@ -4,6 +4,7 @@ import XCTest
 func sleep(seconds: Double = 0.001) async {
   try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
 }
+@MainActor
 var valuesSent = 0
 let channel = Channel<Void>()
   .post("hello") { "client world" }
@@ -17,7 +18,9 @@ let channel = Channel<Void>()
   .stream("stream/cancel") { c in
     for i in 0..<10 {
       c.yield(i)
-      valuesSent += 1
+      await MainActor.run {
+        valuesSent += 1
+      }
       await sleep(seconds: 0.2)
     }
     c.finish()
@@ -80,7 +83,9 @@ class ClientTests: XCTestCase {
 
   func testServerStreamCancel() async throws {
     var a = 0
-    valuesSent = 0
+    await MainActor.run {
+      valuesSent = 0
+    }
     for try await value in client.values("mirror/stream/cancel", as: Int.self) {
       XCTAssertEqual(value, a)
       a += 1
@@ -88,7 +93,9 @@ class ClientTests: XCTestCase {
     }
     // Allow some time for the server to process the cancellation
     await sleep(seconds: 0.1)
-    XCTAssertEqual(valuesSent, 2)
+    await MainActor.run {
+      XCTAssertEqual(valuesSent, 2)
+    }
   }
 
   func testStateAuth() async throws {
@@ -100,7 +107,7 @@ class ClientTests: XCTestCase {
   }
 
   func testStateUnauthorized() async throws {
-    let newClient = Channel<Any>().connect(address: "2049", state: [:])
+    let newClient = Channel<Void>().connect(address: "2049")
 
     // Test that unauthorized request throws an error
     do {
