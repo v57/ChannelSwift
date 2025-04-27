@@ -173,7 +173,6 @@ public struct PendingRequest {
 // MARK: - Channel
 public class Channel<State> {
   private var id = 0
-  public var publish: (_ topic: String, _ body: Any) -> Void = { _, _ in }
   public var requests: [Int: PendingRequest] = [:]
   public var postApi: [String: Function<State>] = [:]
   public var otherPostApi: [(path: (String) -> Bool, request: Function<State>)] = []
