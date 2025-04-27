@@ -480,7 +480,7 @@ public struct ChannelSender<State: Sendable>: Sender, @unchecked Sendable {
       let id = UnsafeMutable<Int?>(nil)
       let request = self.ch.makeRequest(path, body) { response in
         if let error = response.error {
-          continuation.resume(throwing: NSError(domain: "SenderError", code: 0, userInfo: [NSLocalizedDescriptionKey: "\(error)"]))
+          continuation.resume(throwing: ChannelError(text: error))
         } else {
           do {
             try continuation.resume(returning: response.anyBody.body())
@@ -511,7 +511,7 @@ public struct ChannelSender<State: Sendable>: Sender, @unchecked Sendable {
     return try await withCheckedThrowingContinuation { continuation in
       let request = self.ch.makeSubscription(path, body) { response in
         if let error = response.error {
-          continuation.resume(throwing: NSError(domain: "SenderError", code: 0, userInfo: [NSLocalizedDescriptionKey: "\(error)"]))
+          continuation.resume(throwing: ChannelError(text: error))
         } else {
           let topic = response.topic ?? ""
           let cancelClosure = self.connection.addTopic(topic: topic, event: event)
