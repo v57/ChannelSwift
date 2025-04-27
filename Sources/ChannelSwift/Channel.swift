@@ -242,12 +242,10 @@ public class Channel<State> {
   private func receiveOne<C: Controller>(_ some: ReceivedResponse, controller: C) where C.State == State {
     if let path = some.path {
       let id = some.id
-      // Try to get the API function from postApi or otherPostApi.
       let api: Function<State>? = self.postApi[path] ?? otherPostApi.first(where: { $0.path(path) })?.request
       do {
         guard let api else { throw ChannelError(text: "api not found") }
         let bodyParam = Body(body: AnyBody(container: some.container), sender: controller.sender, state: controller.state)
-        // Call the API function asynchronously.
         Task {
           do {
             let result = try await api(bodyParam, path)
@@ -265,33 +263,33 @@ public class Channel<State> {
           controller.respond(Response(id: id, error: ChannelError(error: error)))
         }
       }
-    } else if let streamPath = some.stream {
+    } else if let path = some.stream {
       let id = some.id
-      var api: Stream<State>? = self.streamApi[streamPath]
+      var api: Stream<State>? = self.streamApi[path]
       if api == nil {
-        if let other = self.otherStreamApi.first(where: { $0.path(streamPath) }) {
+        if let other = self.otherStreamApi.first(where: { $0.path(path) }) {
           api = other.request
         }
       }
       do {
         guard let api else { throw ChannelError(text: "api not found") }
         guard let id else { throw ChannelError(text: "stream requires id") }
-        self.streamRequest(id, controller: controller, path: streamPath, body: some.anyBody, stream: api)
+        self.streamRequest(id, controller: controller, path: path, body: some.anyBody, stream: api)
       } catch {
         if let id {
           controller.respond(Response(id: id, error: ChannelError(error: error)))
         }
       }
-    } else if let cancelId = some.cancel {
-      if let stream = streams[cancelId] {
+    } else if let id = some.cancel {
+      if let stream = streams[id] {
         stream.cancel()
-        streams[cancelId] = nil
+        streams[id] = nil
       }
     } else if let sub = some.sub {
       let id = some.id
       guard let subscription = self.eventsApi?[sub] else {
-        if let reqId = id {
-          controller.respond(Response(id: reqId, error: ChannelError(text: "subscription not found")))
+        if let id {
+          controller.respond(Response(id: id, error: ChannelError(text: "subscription not found")))
         }
         return
       }
@@ -420,7 +418,7 @@ public struct ChannelSender<State>: Sender {
   
   public func send<Body: Encodable, Output: Decodable>(_ path: String, body: Body?) async throws -> Output {
     return try await withCheckedThrowingContinuation { continuation in
-      var reqId: Int?
+      var id: Int?
       let request = self.ch.makeRequest(path, body) { response in
         if let error = response.error {
           continuation.resume(throwing: NSError(domain: "SenderError", code: 0, userInfo: [NSLocalizedDescriptionKey: "\(error)"]))
@@ -431,11 +429,11 @@ public struct ChannelSender<State>: Sender {
             continuation.resume(throwing: error)
           }
         }
-        if let id = reqId {
+        if let id {
           self.connection.sent(id)
         }
       }
-      reqId = self.connection.send(request)
+      id = self.connection.send(request)
     }
   }
   
@@ -480,17 +478,17 @@ public struct ChannelSender<State>: Sender {
 public class Values<State, Body: Encodable, Output: Decodable>: AsyncSequence, AsyncIteratorProtocol {
   public typealias Element = Output
   
-  var ch: Channel<State>
-  var path: String
-  var body: Body?
-  var isRunning = false
-  var pending: [((ReceivedResponse) -> Void)] = []
-  var queued: [ReceivedResponse] = []
-  var rid: Int?
-  var onSend: (StreamRequest<Body>) -> Void
-  var onCancel: (Int) -> Void
+  private var ch: Channel<State>
+  private var path: String
+  private var body: Body?
+  private var isRunning = false
+  private var pending: [((ReceivedResponse) -> Void)] = []
+  private var queued: [ReceivedResponse] = []
+  private var rid: Int?
+  private var onSend: (StreamRequest<Body>) -> Void
+  private var onCancel: (Int) -> Void
   
-  public init(ch: Channel<State>, path: String, body: Body?, onSend: @escaping (StreamRequest<Body>) -> Void, onCancel: @escaping (Int) -> Void) {
+  init(ch: Channel<State>, path: String, body: Body?, onSend: @escaping (StreamRequest<Body>) -> Void, onCancel: @escaping (Int) -> Void) {
     self.ch = ch
     self.path = path
     self.body = body
@@ -529,12 +527,6 @@ public class Values<State, Body: Encodable, Output: Decodable>: AsyncSequence, A
       self.start()
     }
   }
-  
-  public func cancel() {
-    if let rid = self.rid {
-      self.onCancel(rid)
-    }
-  }
   public func makeAsyncIterator() -> Values {
     return self
   }
@@ -562,8 +554,8 @@ func parseSubscription(_ object: Any, _ prefix: String, _ map: inout [String: Su
       subscription.prefix = prefix.count > 0 ? "\(prefix)/\(key)" : key
       map[prefix + key] = subscription
       continue
-    } else if let subObj = value as? [String: Any] {
-      parseSubscription(subObj, "\(prefix)\(key)/", &map)
+    } else if let value = value as? [String: Any] {
+      parseSubscription(value, "\(prefix)\(key)/", &map)
     }
   }
 }
@@ -573,12 +565,7 @@ public protocol EventPublisher {
 
 public struct SubscriptionEvent {
   public var topic: String
-  public var body: Any
-  
-  public init(topic: String, body: Any) {
-    self.topic = topic
-    self.body = body
-  }
+  public var body: Encodable
 }
 public protocol SubscriptionProtocol: AnyObject {
   var prefix: String { get set }
@@ -620,21 +607,6 @@ public class Subscription<Input: Decodable, Output: Encodable>: SubscriptionProt
 
 
 // MARK: - Codable
-public struct AnyEncodable: Encodable {
-  let body: Encodable
-  public func encode(to encoder: any Encoder) throws {
-    var container = encoder.singleValueContainer()
-    try container.encode(body)
-  }
-}
-
-public struct AnyDecodable: Decodable {
-  var container: SingleValueDecodingContainer
-  public init(from decoder: any Decoder) throws {
-    container = try decoder.singleValueContainer()
-  }
-}
-
 public struct AnyBody {
   private let container: KeyedDecodingContainer<ReceivedResponse.CodingKeys>
   init(container: KeyedDecodingContainer<ReceivedResponse.CodingKeys>) {

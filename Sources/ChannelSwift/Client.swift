@@ -298,6 +298,13 @@ public class WebSocketClient: NSObject, URLSessionWebSocketDelegate {
   public func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didCloseWith closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
     handleDisconnection()
   }
+  private struct AnyEncodable: Encodable {
+    let body: Encodable
+    func encode(to encoder: any Encoder) throws {
+      var container = encoder.singleValueContainer()
+      try container.encode(body)
+    }
+  }
 }
 
 // MARK: Events
