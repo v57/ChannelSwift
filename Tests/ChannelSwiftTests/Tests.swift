@@ -6,7 +6,7 @@ func sleep(seconds: Double = 0.001) async {
 }
 var valuesSent = 0
 let channel = Channel<Void>()
-  .post("hello", request: { _, _  in "client world" })
+  .post("hello") { "client world" }
   .stream("stream/values") { _, _ in
     return AsyncThrowingStream { continuation in
       Task {

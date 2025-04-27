@@ -31,8 +31,8 @@ public protocol ConnectionInterface {
 }
 
 // MARK: - Types
-public typealias Function<State> = (Body<State>, String) async throws -> Encodable
-public typealias Stream<State> = (Body<State>, String) -> AsyncThrowingStream<Encodable, Error>
+public typealias Function<State> = (AnonymousBody<State>, String) async throws -> Encodable
+public typealias Stream<State> = (AnonymousBody<State>, String) -> AsyncThrowingStream<Encodable, Error>
 public struct Request<Body: Encodable>: Encodable {
   public var id: Int
   public var path: String
@@ -43,15 +43,15 @@ public struct Request<Body: Encodable>: Encodable {
     self.body = body
   }
 }
-public struct Body<State> {
-  public var body: Any
+public struct AnonymousBody<State> {
+  public var body: AnyBody
   public var sender: any Sender
   public var state: State
-  public init(body: Any, sender: any Sender, state: State) {
-    self.body = body
-    self.sender = sender
-    self.state = state
-  }
+}
+public struct Body<Body: Decodable, State> {
+  public var body: Body
+  public var sender: any Sender
+  public var state: State
 }
 
 public struct SubscriptionRequest<Body: Encodable>: Encodable {
@@ -184,10 +184,39 @@ public class Channel<State> {
   
   public init() { }
   
-  public func post(_ path: String, request: @escaping Function<State>) -> Self {
-    self.postApi[path] = request
+  public func post<Input: Decodable, Output: Encodable>(_ path: String, request: @escaping ((Body<Input, State>) async throws -> Output)) -> Self {
+    postApi[path] = { body, _ in
+      try await request(Body(body: body.body.body(), sender: body.sender, state: body.state))
+    }
     return self
   }
+  public func post<Input: Decodable, Output: Encodable>(_ path: String, request: @escaping ((Input) async throws -> Output)) -> Self {
+    postApi[path] = { body, _ in
+      try await request(body.body.body())
+    }
+    return self
+  }
+  public func post<Input: Decodable>(_ path: String, request: @escaping ((Input) async throws -> Void)) -> Self {
+    postApi[path] = { body, _ in
+      try await request(body.body.body())
+      return EmptyCodable()
+    }
+    return self
+  }
+  public func post<Output: Encodable>(_ path: String, request: @escaping (() async throws -> Output)) -> Self {
+    postApi[path] = { _, _ in
+      try await request()
+    }
+    return self
+  }
+  public func post(_ path: String, request: @escaping (() async throws -> Void)) -> Self {
+    postApi[path] = { _, _ in
+      try await request()
+      return EmptyCodable()
+    }
+    return self
+  }
+  
   
   public func postOther(_ path: @escaping (String) -> Bool, request: @escaping Function<State>) -> Self {
     self.otherPostApi.append((path: path, request: request))
@@ -244,7 +273,7 @@ public class Channel<State> {
       let api: Function<State>? = self.postApi[path] ?? otherPostApi.first(where: { $0.path(path) })?.request
       do {
         guard let api else { throw ChannelError(text: "api not found") }
-        let bodyParam = Body(body: AnyBody(container: some.container), sender: controller.sender, state: controller.state)
+        let bodyParam = AnonymousBody(body: AnyBody(container: some.container), sender: controller.sender, state: controller.state)
         Task {
           do {
             let result = try await api(bodyParam, path)
@@ -330,7 +359,7 @@ public class Channel<State> {
   private func streamRequest<C: Controller>(_ id: Int, controller: C, path: String, body: AnyBody, stream: @escaping Stream<State>) where C.State == State {
     self.streams[id] = Task {
       do {
-        let bodyParam = Body(body: body as Any, sender: controller.sender, state: controller.state)
+        let bodyParam = AnonymousBody(body: body, sender: controller.sender, state: controller.state)
         let values = stream(bodyParam, path)
         for try await value in values {
           controller.respond(Response(id: id, body: value))
