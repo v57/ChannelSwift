@@ -217,10 +217,12 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
       trySend(body)
       isWaiting = 1
       isWaitingLength = 0
-      DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) { [weak self] in
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in
         guard let self else { return }
-        if self.isWaitingLength > 4000 {
-          self.isWaiting = 3
+        if isWaitingLength > 1000 {
+          isWaiting = 3
+        } else {
+          isWaiting = 0
         }
       }
     case 1:
