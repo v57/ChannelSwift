@@ -585,18 +585,20 @@ public class Values<State: Sendable, Body: Encodable & Sendable, Output: Decodab
   
   public func next() async throws -> Element? {
     try await withCheckedThrowingContinuation { continuation in
-      self.pending.append { response in
-        do {
-          if response.done == true {
-            continuation.resume(returning: try? response.anyBody.body())
-          } else {
-            try continuation.resume(returning: response.anyBody.body())
+      DispatchQueue.main.async {
+        self.pending.append { response in
+          do {
+            if response.done == true {
+              continuation.resume(returning: try? response.anyBody.body())
+            } else {
+              try continuation.resume(returning: response.anyBody.body())
+            }
+          } catch {
+            continuation.resume(throwing: error)
           }
-        } catch {
-          continuation.resume(throwing: error)
         }
+        self.start()
       }
-      self.start()
     }
   }
   public func makeAsyncIterator() -> Values {
