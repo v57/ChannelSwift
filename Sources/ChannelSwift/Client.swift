@@ -167,7 +167,7 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
           guard let data = text.data(using: .utf8) else { return }
           decoderQueue.async {
             do {
-              let array = try JSONDecoder().decode(DecodableArray<ReceivedResponse>.self, from: data).array
+              let array = try JSONDecoder.iso8601.decode(DecodableArray<ReceivedResponse>.self, from: data).array
               DispatchQueue.main.async {
                 self.onMessage?(array)
               }
@@ -251,7 +251,7 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
     guard isConnected else { return }
     guard let webSocket else { return }
     encoderQueue.async {
-      guard let string = try? String(data: JSONEncoder().encode(encodable), encoding: .utf8) else { return }
+      guard let string = try? String(data: JSONEncoder.iso8601.encode(encodable), encoding: .utf8) else { return }
       webSocket.send(.string(string)) { _ in }
     }
   }
@@ -332,3 +332,30 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
   }
 }
 
+
+extension JSONDecoder {
+  @available(macOS 12.0, iOS 15.0, tvOS 15.0, watchOS 8.0, *)
+  static let formatter = Date.ISO8601FormatStyle().dateSeparator(.dash).time(includingFractionalSeconds: true)
+  struct InvalidDateFormat: Error { }
+  static let iso8601: JSONDecoder = {
+    let decoder = JSONDecoder()
+    if #available(macOS 12.0, iOS 15.0, tvOS 15.0, watchOS 8.0, *) {
+      decoder.dateDecodingStrategy = .custom {
+        let string = try $0.singleValueContainer().decode(String.self)
+        return try Date.init(string, strategy: formatter)
+      }
+    }
+    return decoder
+  }()
+}
+extension JSONEncoder {
+  static let iso8601: JSONEncoder = {
+    let encoder = JSONEncoder()
+    if #available(macOS 12.0, iOS 15.0, tvOS 15.0, watchOS 8.0, *) {
+      encoder.dateEncodingStrategy = .custom { date, encoder in
+        try JSONDecoder.formatter.format(date).encode(to: encoder)
+      }
+    }
+    return encoder
+  }()
+}
