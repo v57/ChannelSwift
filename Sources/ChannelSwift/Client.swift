@@ -8,7 +8,6 @@
 import Foundation
 import Combine
 
-// Extend Channel with connect method
 extension Channel {
   public func connect(address: String, options: ClientOptions<State> = ClientOptions()) -> ClientSender<State> where State == Void {
     connect(address: address, state: (), options: options)
@@ -88,7 +87,7 @@ public struct ClientSender<State: Sendable>: ProxySender {
 // MARK: - ChannelController
 
 private struct ChannelController<State: Sendable>: Controller {
-  func respond(_ response: Encodable) {
+  func respond(_ response: Encodable & Sendable) {
     self.respond(response)
   }
   
@@ -104,7 +103,7 @@ private struct ChannelController<State: Sendable>: Controller {
     self.event(topic, event)
   }
   
-  let respond: @Sendable (Encodable) -> Void
+  let respond: @Sendable (Encodable & Sendable) -> Void
   let subscribe: @Sendable (String) -> Void
   let unsubscribe: @Sendable (String) -> Void
   let event: @Sendable (String, AnyBody) -> Void
@@ -118,7 +117,6 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
   private let address: String
   private var webSocket: URLSessionWebSocketTask?
   private var session: URLSession!
-  private let queue = DispatchQueue(label: "com.channel.websocket", qos: .userInteractive)
   
   public var onOpen: (() -> Void)?
   public var onMessage: (([ReceivedResponse]) -> Void)?
@@ -130,6 +128,8 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
   private var isConnected = false
   private var headers: (() -> [String: String])?
   private var reconnectTimer: Timer?
+  private let decoderQueue = DispatchQueue(label: "decoder")
+  private let encoderQueue = DispatchQueue(label: "encoder")
   
   public init(address: String, headers: (() -> [String: String])? = nil) {
     self.address = address
@@ -165,15 +165,16 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
         switch message {
         case .string(let text):
           guard let data = text.data(using: .utf8) else { return }
-          do {
-            let array = try JSONDecoder().decode(DecodableArray<ReceivedResponse>.self, from: data).array
-            DispatchQueue.main.async {
-              self.onMessage?(array)
-            }
-          } catch { }
+          decoderQueue.async {
+            do {
+              let array = try JSONDecoder().decode(DecodableArray<ReceivedResponse>.self, from: data).array
+              DispatchQueue.main.async {
+                self.onMessage?(array)
+              }
+            } catch { }
+          }
         default: break
         }
-        
         // Continue receiving messages
         self.receiveMessage()
       case .failure:
@@ -202,7 +203,7 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
   }
   
   @discardableResult
-  public func send<Body: Encodable>(_ body: Body) -> Int {
+  public func send<Body: Encodable & Sendable>(_ body: Body) -> Int {
     let id = self.id
     self.id += 1
     pending[id] = AnyEncodable(body: body)
@@ -216,7 +217,7 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
       trySend(body)
       isWaiting = 1
       isWaitingLength = 0
-      queue.asyncAfter(deadline: .now() + 0.01) { [weak self] in
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) { [weak self] in
         guard let self else { return }
         if self.isWaitingLength > 4000 {
           self.isWaiting = 3
@@ -230,7 +231,7 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
     case 3:
       trySend(body)
       isWaiting = 2
-      queue.asyncAfter(deadline: .now() + 0.02) { [weak self] in
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in
         guard let self else { return }
         self.isWaiting = 3
         if !self.messageQueue.isEmpty {
@@ -244,11 +245,13 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
     return id
   }
   
-  private func trySend<Body: Encodable>(_ encodable: Body) {
+  private func trySend<Body: Encodable & Sendable>(_ encodable: Body) {
     guard isConnected else { return }
     guard let webSocket else { return }
-    guard let string = try? String(data: JSONEncoder().encode(encodable), encoding: .utf8) else { return }
-    webSocket.send(.string(string)) { _ in }
+    encoderQueue.async {
+      guard let string = try? String(data: JSONEncoder().encode(encodable), encoding: .utf8) else { return }
+      webSocket.send(.string(string)) { _ in }
+    }
   }
   
   public func cancel(_ id: Int) -> Bool {
@@ -258,7 +261,7 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
     return true
   }
   
-  public func notify<Body: Encodable>(_ body: Body) {
+  public func notify<Body: Encodable & Sendable>(_ body: Body) {
     trySend(body)
   }
   
@@ -270,17 +273,11 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
     isWaiting = 3
   }
   
-  // MARK: URLSessionWebSocketDelegate
-  
   public func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didOpenWithProtocol protocol: String?) {
     isConnected = true
-    
-    // Send any pending messages
     if !pending.isEmpty {
       send(Array(pending.values))
     }
-    
-    // Call onOpen handler
     DispatchQueue.main.async { [weak self] in
       self?.onOpen?()
     }
@@ -289,7 +286,7 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
   public func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didCloseWith closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
     handleDisconnection()
   }
-  private struct AnyEncodable: Encodable {
+  private struct AnyEncodable: Encodable, @unchecked Sendable {
     let body: Encodable
     func encode(to encoder: any Encoder) throws {
       var container = encoder.singleValueContainer()

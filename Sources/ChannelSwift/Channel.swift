@@ -11,7 +11,7 @@ import Foundation
 
 public protocol Controller: Sendable {
   associatedtype State
-  func respond(_ response: Encodable)
+  func respond(_ response: Encodable & Sendable)
   func subscribe(_ topic: String)
   func unsubscribe(_ topic: String)
   func event(_ topic: String, _ event: AnyBody)
@@ -383,7 +383,7 @@ public class Channel<State: Sendable>: @unchecked Sendable {
     } else if let id = some.id {
       guard let request = self.requests[id] else { return }
       if !((request.request is StreamRequestProtocol) && (some.done != true) ) {
-        self.requests.removeValue(forKey: id)
+        self.requests[id] = nil
       }
       request.onResponse(some)
     }
@@ -427,8 +427,11 @@ public class Channel<State: Sendable>: @unchecked Sendable {
 // MARK: - Sender
 public protocol Sender: Sendable {
   associatedtype State: Sendable
+  @MainActor
   func send<Body: Encodable, Output: Decodable>(_ path: String, body: Body?) async throws -> Output
+  @MainActor
   func values<Body: Encodable, Output: Decodable>(_ path: String, body: Body?) -> Values<State, Body, Output>
+  @MainActor
   func subscribe<Body: Encodable & Sendable>(_ path: String, body: Body?, event: @escaping @Sendable (AnyBody) -> Void) async throws -> _Cancellable
   func stop()
 }
@@ -437,12 +440,15 @@ public protocol ProxySender: Sender where ParentSender.State == State {
   var sender: ParentSender { get }
 }
 public extension ProxySender {
+  @MainActor
   func send<Body: Encodable, Output: Decodable>(_ path: String, body: Body?) async throws -> Output {
     try await sender.send(path, body: body)
   }
+  @MainActor
   func values<Body: Encodable, Output: Decodable>(_ path: String, body: Body?) -> Values<State, Body, Output> {
     sender.values(path, body: body)
   }
+  @MainActor
   func subscribe<Body: Encodable & Sendable>(_ path: String, body: Body?, event: @escaping @Sendable (AnyBody) -> Void) async throws -> _Cancellable {
     try await sender.subscribe(path, body: body, event: event)
   }
@@ -451,18 +457,23 @@ public extension ProxySender {
   }
 }
 public extension Sender {
+  @MainActor
   func send<Output: Decodable>(_ path: String) async throws -> Output {
     try await send(path, body: Optional<EmptyCodable>.none)
   }
+  @MainActor
   func send<Body: Encodable>(_ path: String, body: Body?) async throws {
     _ = try await send(path, body: body) as EmptyCodable?
   }
+  @MainActor
   func send(_ path: String) async throws {
     _ = try await send(path, body: Optional<EmptyCodable>.none) as EmptyCodable?
   }
+  @MainActor
   func values<Output: Decodable>(_ path: String, as: Output.Type = Output.self) -> Values<State, EmptyCodable, Output> {
     values(path, body: Optional<EmptyCodable>.none)
   }
+  @MainActor
   func subscribe(_ path: String, event: @escaping @Sendable (AnyBody) -> Void) async throws -> _Cancellable {
     try await subscribe(path, body: Optional<EmptyCodable>.none, event: event)
   }
@@ -637,6 +648,7 @@ public struct SubscriptionEvent {
 }
 public protocol SubscriptionProtocol: AnyObject {
   var prefix: String { get set }
+  var publishers: [EventPublisher] { get set }
   func getTopic(request: AnyBody) throws -> String
   func getBody(request: AnyBody) throws -> (Encodable & Sendable)?
 }
