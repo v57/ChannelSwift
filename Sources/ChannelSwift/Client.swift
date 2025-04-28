@@ -230,12 +230,12 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
     case 3:
       trySend(body)
       isWaiting = 2
-      queue.asyncAfter(deadline: .now() + 0.001) { [weak self] in
+      queue.asyncAfter(deadline: .now() + 0.02) { [weak self] in
         guard let self else { return }
         self.isWaiting = 3
         if !self.messageQueue.isEmpty {
           trySend(messageQueue)
-          self.messageQueue.removeAll()
+          self.messageQueue.removeAll(keepingCapacity: true)
         }
       }
     default: break
