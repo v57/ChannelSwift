@@ -48,6 +48,7 @@ func noReturn() async throws {
 }
 
 @Test("stream/values")
+@MainActor
 func stream() async throws {
   var a = 0
   for try await value in client.values("stream/values", as: Int.self) {
@@ -58,6 +59,7 @@ func stream() async throws {
 }
 
 @Test("stream/cancel")
+@MainActor
 func streamCancel() async throws {
   var a = 0
   for try await value in client.values("stream/cancel", as: Int.self) {
@@ -77,6 +79,7 @@ func serverPost() async throws {
 }
 
 @Test("mirror/stream")
+@MainActor
 func serverStream() async throws {
   var a = 0
   for try await value in client.values("mirror/stream", as: Int.self) {
@@ -86,6 +89,7 @@ func serverStream() async throws {
 }
 
 @Test("mirror/stream/cancel")
+@MainActor
 func serverStreamCancel() async throws {
   var a = 0
   await MainActor.run {
@@ -104,6 +108,7 @@ func serverStreamCancel() async throws {
 }
 
 @Test("auth/name")
+@MainActor
 func stateAuth() async throws {
   let newClient = Channel<Void>().connect(address: "2049")
   try await newClient.send("auth", body: ["name": "tester"])
