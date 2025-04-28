@@ -5,7 +5,7 @@
 //  Created by Dmitry Kozlov on 28/4/25.
 //
 
-import ChannelSwift
+import Channel
 import Dispatch
 
 let channel = Channel<Void>()

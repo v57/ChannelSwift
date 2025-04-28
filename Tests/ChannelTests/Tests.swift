@@ -1,5 +1,5 @@
 import Testing
-@testable import ChannelSwift
+@testable import Channel
 
 func sleep(seconds: Double = 0.001) async {
   try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
