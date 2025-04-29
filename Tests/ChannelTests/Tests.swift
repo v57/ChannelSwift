@@ -37,7 +37,7 @@ func hello() async throws {
 @Test("echo")
 func echo() async throws {
   let random = Double.random(in: 0..<1)
-  let response: Double = try await client.send("echo", body: random)
+  let response: Double = try await client.send("echo", random)
   #expect(response == random)
 }
 
@@ -111,13 +111,14 @@ func serverStreamCancel() async throws {
 @MainActor
 func stateAuth() async throws {
   let newClient = Channel<Void>().connect(2049)
-  try await newClient.send("auth", body: ["name": "tester"])
+  try await newClient.send("auth", ["name": "tester"])
   let name: String = try await newClient.send("auth/name")
   #expect(name == "tester")
   newClient.stop()
 }
 
 @Test("auth/name/failed")
+@MainActor
 func unauthorized() async throws {
   let newClient = Channel<Void>().connect(2049)
 

@@ -428,54 +428,50 @@ public class Channel<State: Sendable>: @unchecked Sendable {
 public protocol Sender: Sendable {
   associatedtype State: Sendable
   @MainActor
-  func send<Body: Encodable, Output: Decodable>(_ path: String, body: Body?) async throws -> Output
+  func send<Body: Encodable, Output: Decodable>(_ path: String, _ body: Body?) async throws -> Output
   @MainActor
-  func values<Body: Encodable, Output: Decodable>(_ path: String, body: Body?) -> Values<State, Body, Output>
+  func values<Body: Encodable, Output: Decodable>(_ path: String, _ body: Body?) -> Values<State, Body, Output>
   @MainActor
-  func subscribe<Body: Encodable & Sendable>(_ path: String, body: Body?, event: @escaping @Sendable (AnyBody) -> Void) async throws -> _Cancellable
+  func subscribe<Body: Encodable & Sendable>(_ path: String, _ body: Body?, event: @escaping @Sendable (AnyBody) -> Void) async throws -> _Cancellable
+  @MainActor
   func stop()
 }
 public protocol ProxySender: Sender where ParentSender.State == State {
   associatedtype ParentSender: Sender
   var sender: ParentSender { get }
 }
+
+@MainActor
 public extension ProxySender {
-  @MainActor
-  func send<Body: Encodable, Output: Decodable>(_ path: String, body: Body?) async throws -> Output {
-    try await sender.send(path, body: body)
+  func send<Body: Encodable, Output: Decodable>(_ path: String, _ body: Body?) async throws -> Output {
+    try await sender.send(path, body)
   }
-  @MainActor
-  func values<Body: Encodable, Output: Decodable>(_ path: String, body: Body?) -> Values<State, Body, Output> {
-    sender.values(path, body: body)
+  func values<Body: Encodable, Output: Decodable>(_ path: String, _ body: Body?) -> Values<State, Body, Output> {
+    sender.values(path, body)
   }
-  @MainActor
-  func subscribe<Body: Encodable & Sendable>(_ path: String, body: Body?, event: @escaping @Sendable (AnyBody) -> Void) async throws -> _Cancellable {
-    try await sender.subscribe(path, body: body, event: event)
+  func subscribe<Body: Encodable & Sendable>(_ path: String, _ body: Body?, event: @escaping @Sendable (AnyBody) -> Void) async throws -> _Cancellable {
+    try await sender.subscribe(path, body, event: event)
   }
   func stop() {
     sender.stop()
   }
 }
+@MainActor
 public extension Sender {
-  @MainActor
   func send<Output: Decodable>(_ path: String) async throws -> Output {
-    try await send(path, body: Optional<EmptyCodable>.none)
+    try await send(path, Optional<EmptyCodable>.none)
   }
-  @MainActor
-  func send<Body: Encodable>(_ path: String, body: Body?) async throws {
-    _ = try await send(path, body: body) as EmptyCodable?
+  func send<Body: Encodable>(_ path: String, _ body: Body?) async throws {
+    _ = try await send(path, body) as EmptyCodable?
   }
-  @MainActor
   func send(_ path: String) async throws {
-    _ = try await send(path, body: Optional<EmptyCodable>.none) as EmptyCodable?
+    _ = try await send(path, Optional<EmptyCodable>.none) as EmptyCodable?
   }
-  @MainActor
   func values<Output: Decodable>(_ path: String, as: Output.Type = Output.self) -> Values<State, EmptyCodable, Output> {
-    values(path, body: Optional<EmptyCodable>.none)
+    values(path, Optional<EmptyCodable>.none)
   }
-  @MainActor
   func subscribe(_ path: String, event: @escaping @Sendable (AnyBody) -> Void) async throws -> _Cancellable {
-    try await subscribe(path, body: Optional<EmptyCodable>.none, event: event)
+    try await subscribe(path, Optional<EmptyCodable>.none, event: event)
   }
 }
 
@@ -488,7 +484,7 @@ public struct ChannelSender<State: Sendable>: Sender, @unchecked Sendable {
     self.connection = connection
   }
   
-  public func send<Body: Encodable & Sendable, Output: Decodable>(_ path: String, body: Body?) async throws -> Output {
+  public func send<Body: Encodable & Sendable, Output: Decodable>(_ path: String, _ body: Body?) async throws -> Output {
     return try await withCheckedThrowingContinuation { continuation in
       let id = UnsafeMutable<Int?>(nil)
       let request = self.ch.makeRequest(path, body) { response in
@@ -509,7 +505,7 @@ public struct ChannelSender<State: Sendable>: Sender, @unchecked Sendable {
     }
   }
   
-  public func values<Body: Encodable, Output: Decodable>(_ path: String, body: Body?) -> Values<State, Body, Output> {
+  public func values<Body: Encodable, Output: Decodable>(_ path: String, _ body: Body?) -> Values<State, Body, Output> {
     let rid = UnsafeMutable<Int?>(nil)
     return Values(ch: ch, path: path, body: body, onSend: { req in
       rid.value = self.connection.send(req)
@@ -520,7 +516,7 @@ public struct ChannelSender<State: Sendable>: Sender, @unchecked Sendable {
     })
   }
   
-  public func subscribe<Body: Encodable & Sendable>(_ path: String, body: Body?, event: @escaping @Sendable (AnyBody) -> Void) async throws -> _Cancellable {
+  public func subscribe<Body: Encodable & Sendable>(_ path: String, _ body: Body?, event: @escaping @Sendable (AnyBody) -> Void) async throws -> _Cancellable {
     return try await withCheckedThrowingContinuation { continuation in
       let request = self.ch.makeSubscription(path, body) { response in
         if let error = response.error {
