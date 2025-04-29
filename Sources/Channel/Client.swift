@@ -130,7 +130,7 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
   private var isWaiting = 0
   private var isWaitingLength = 0
   private var messageQueue = [AnyEncodable]()
-  private var isConnected = false
+  @Published public private(set) var isConnected = false
   private var headers: (() -> [String: String])?
   private var reconnectTimer: Timer?
   private let decoderQueue = DispatchQueue(label: "decoder")
