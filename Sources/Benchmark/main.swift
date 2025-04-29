@@ -9,7 +9,7 @@ import Channel
 import Dispatch
 
 let channel = Channel<Void>()
-let client = channel.connect(address: "2049", state: ())
+let client = channel.connect(2049)
 
 func _send(_ count: Int) async throws {
   for _ in 0..<count {

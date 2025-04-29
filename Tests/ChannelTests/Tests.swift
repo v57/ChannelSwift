@@ -26,7 +26,7 @@ let channel = Channel<Void>()
     c.finish()
   }
 
-let client = channel.connect(address: "2049", state: ())
+let client = channel.connect(2049)
 
 @Test("hello")
 func hello() async throws {
@@ -110,7 +110,7 @@ func serverStreamCancel() async throws {
 @Test("auth/name")
 @MainActor
 func stateAuth() async throws {
-  let newClient = Channel<Void>().connect(address: "2049")
+  let newClient = Channel<Void>().connect(2049)
   try await newClient.send("auth", body: ["name": "tester"])
   let name: String = try await newClient.send("auth/name")
   #expect(name == "tester")
@@ -119,7 +119,7 @@ func stateAuth() async throws {
 
 @Test("auth/name/failed")
 func unauthorized() async throws {
-  let newClient = Channel<Void>().connect(address: "2049")
+  let newClient = Channel<Void>().connect(2049)
 
   // Test that unauthorized request throws an error
   do {

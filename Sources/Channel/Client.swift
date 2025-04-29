@@ -8,14 +8,19 @@
 import Foundation
 import Combine
 
-extension Channel {
-  public func connect(address: String, options: ClientOptions<State> = ClientOptions()) -> ClientSender<State> where State == Void {
-    connect(address: address, state: (), options: options)
+public extension Channel {
+  func connect(_ port: Int, state: State, options: ClientOptions<State> = ClientOptions()) -> ClientSender<State> {
+    connect(URL(string: "ws://127.0.0.1:\(port)")!, state: state, options: options)
   }
-  public func connect(address: String, state: State, options: ClientOptions<State> = ClientOptions()) -> ClientSender<State> {
+  func connect(_ port: Int, options: ClientOptions<State> = ClientOptions()) -> ClientSender<State> where State == Void {
+    connect(port, state: (), options: options)
+  }
+  func connect(_ url: URL, options: ClientOptions<State> = ClientOptions()) -> ClientSender<State> where State == Void {
+    connect(url, state: (), options: options)
+  }
+  func connect(_ url: URL, state: State, options: ClientOptions<State> = ClientOptions()) -> ClientSender<State> {
     let ch = self
-    let wsAddress = address.starts(with: "ws") ? address : "ws://localhost:\(address)"
-    let ws = WebSocketClient(address: wsAddress, headers: options.headers)
+    let ws = WebSocketClient(url: url, headers: options.headers)
     let topics = UnsafeMutable(Set<String>())
     let sender = ChannelSender(ch: ch, connection: ws)
     
@@ -114,7 +119,7 @@ private struct ChannelController<State: Sendable>: Controller {
 // MARK: - WebSocketClient
 public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, ConnectionInterface, @unchecked Sendable {
   private var id: Int = 0
-  private let address: String
+  private let url: URL
   private var webSocket: URLSessionWebSocketTask?
   private var session: URLSession!
   
@@ -131,8 +136,8 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
   private let decoderQueue = DispatchQueue(label: "decoder")
   private let encoderQueue = DispatchQueue(label: "encoder")
   
-  public init(address: String, headers: (() -> [String: String])? = nil) {
-    self.address = address
+  public init(url: URL, headers: (() -> [String: String])? = nil) {
+    self.url = url
     self.headers = headers
     super.init()
     self.session = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
@@ -140,8 +145,6 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
   }
   
   public func start() {
-    guard let url = URL(string: address) else { return }
-    
     var request = URLRequest(url: url)
     if let headerProvider = headers {
       let headerFields = headerProvider()
