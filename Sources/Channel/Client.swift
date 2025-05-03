@@ -181,19 +181,19 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
         // Continue receiving messages
         self.receiveMessage()
       case .failure:
-        self.handleDisconnection()
+        self.disconnected()
       }
     }
   }
   
-  private func handleDisconnection() {
+  private func disconnected() {
     isConnected = false
     webSocket = nil
     
     // Schedule reconnection
     DispatchQueue.main.async {
       self.reconnectTimer?.invalidate()
-      self.reconnectTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: false) { [weak self] _ in
+      self.reconnectTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: false) { [weak self] _ in
         self?.start()
       }
     }
@@ -289,7 +289,7 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
   }
   
   public func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didCloseWith closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
-    handleDisconnection()
+    disconnected()
   }
   private struct AnyEncodable: Encodable, @unchecked Sendable {
     let body: Encodable
