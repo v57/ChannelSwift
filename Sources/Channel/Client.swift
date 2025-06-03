@@ -125,6 +125,7 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
   
   public var onOpen: (() -> Void)?
   public var onMessage: (([ReceivedResponse]) -> Void)?
+  public var debug: Bool = false
   
   private var pending = [Int: AnyEncodable]()
   private var isWaiting = 0
@@ -168,6 +169,7 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
         switch message {
         case .string(let text):
           guard let data = text.data(using: .utf8) else { return }
+          if debug { print("ws:", text) }
           decoderQueue.async {
             do {
               let array = try JSONDecoder.iso8601.decode(DecodableArray<ReceivedResponse>.self, from: data).array
@@ -253,8 +255,12 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
   private func trySend<Body: Encodable & Sendable>(_ encodable: Body) {
     guard isConnected else { return }
     guard let webSocket else { return }
+    let debug = self.debug
     encoderQueue.async {
       guard let string = try? String(data: JSONEncoder.iso8601.encode(encodable), encoding: .utf8) else { return }
+      if debug {
+        print("me:", string)
+      }
       webSocket.send(.string(string)) { _ in }
     }
   }
