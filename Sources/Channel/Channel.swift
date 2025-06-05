@@ -583,17 +583,23 @@ public class Values<State: Sendable, Body: Encodable & Sendable, Output: Decodab
     if !queued.isEmpty {
       return try queued.removeFirst().parseStream()
     } else {
-      return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Element?, Error>) in
-        DispatchQueue.main.async {
-          self.pending.append { response in
-            do {
-              let value: Element? = try response.parseStream()
-              continuation.resume(returning: value)
-            } catch {
-              continuation.resume(throwing: error)
+      return try await withTaskCancellationHandler {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Element?, Error>) in
+          DispatchQueue.main.async {
+            self.pending.append { response in
+              do {
+                let value: Element? = try response.parseStream()
+                continuation.resume(returning: value)
+              } catch {
+                continuation.resume(throwing: error)
+              }
             }
+            self.start()
           }
-          self.start()
+        }
+      } onCancel: {
+        if let rid {
+          onCancel(rid)
         }
       }
     }
