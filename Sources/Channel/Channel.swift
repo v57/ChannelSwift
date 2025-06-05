@@ -580,25 +580,37 @@ public class Values<State: Sendable, Body: Encodable & Sendable, Output: Decodab
   }
   
   public func next() async throws -> Element? {
-    try await withCheckedThrowingContinuation { continuation in
-      DispatchQueue.main.async {
-        self.pending.append { response in
-          do {
-            if response.done == true {
-              continuation.resume(returning: try? response.anyBody.body())
-            } else {
-              try continuation.resume(returning: response.anyBody.body())
+    if !queued.isEmpty {
+      return try queued.removeFirst().parseStream()
+    } else {
+      return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Element?, Error>) in
+        DispatchQueue.main.async {
+          self.pending.append { response in
+            do {
+              let value: Element? = try response.parseStream()
+              continuation.resume(returning: value)
+            } catch {
+              continuation.resume(throwing: error)
             }
-          } catch {
-            continuation.resume(throwing: error)
           }
+          self.start()
         }
-        self.start()
       }
     }
   }
   public func makeAsyncIterator() -> Values {
     return self
+  }
+}
+private extension ReceivedResponse {
+  func parseStream<T: Decodable>() throws -> T? {
+    if done == true {
+      return try? anyBody.body()
+    } else if let error {
+      throw ChannelError(text: error)
+    } else {
+      return try anyBody.body()
+    }
   }
 }
 
