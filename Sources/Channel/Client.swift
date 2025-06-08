@@ -108,10 +108,10 @@ private struct ChannelController<State: Sendable>: Controller {
     self.event(topic, event)
   }
   
-  let respond: @Sendable (Encodable & Sendable) -> Void
-  let subscribe: @Sendable (String) -> Void
-  let unsubscribe: @Sendable (String) -> Void
-  let event: @Sendable (String, AnyBody) -> Void
+  let respond: @Sendable @MainActor (Encodable & Sendable) -> Void
+  let subscribe: @Sendable @MainActor (String) -> Void
+  let unsubscribe: @Sendable @MainActor (String) -> Void
+  let event: @Sendable @MainActor (String, AnyBody) -> Void
   let sender: any Sender
   let state: State
 }
@@ -126,7 +126,6 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
   public var onOpen: (() -> Void)?
   public var onMessage: (([ReceivedResponse]) -> Void)?
   public var debug: Bool = false
-  
   private var pending = [Int: AnyEncodable]()
   private var isWaiting = 0
   private var isWaitingLength = 0
@@ -164,26 +163,28 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
   private func receiveMessage() {
     webSocket?.receive { [weak self] result in
       guard let self else { return }
-      switch result {
-      case .success(let message):
-        switch message {
-        case .string(let text):
-          guard let data = text.data(using: .utf8) else { return }
-          if debug { print("ws:", text) }
-          decoderQueue.async {
-            do {
-              let array = try JSONDecoder.iso8601.decode(DecodableArray<ReceivedResponse>.self, from: data).array
-              DispatchQueue.main.async {
-                self.onMessage?(array)
-              }
-            } catch { }
+      Task { @MainActor in
+        switch result {
+        case .success(let message):
+          switch message {
+          case .string(let text):
+            guard let data = text.data(using: .utf8) else { return }
+            if debug { print("ws:", text) }
+            decoderQueue.async {
+              do {
+                let array = try JSONDecoder.iso8601.decode(DecodableArray<ReceivedResponse>.self, from: data).array
+                DispatchQueue.main.async {
+                  self.onMessage?(array)
+                }
+              } catch { }
+            }
+          default: break
           }
-        default: break
+          // Continue receiving messages
+          self.receiveMessage()
+        case .failure:
+          self.disconnected()
         }
-        // Continue receiving messages
-        self.receiveMessage()
-      case .failure:
-        self.disconnected()
       }
     }
   }
@@ -196,7 +197,9 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
     DispatchQueue.main.async {
       self.reconnectTimer?.invalidate()
       self.reconnectTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: false) { [weak self] _ in
-        self?.start()
+        Task { @MainActor in
+          self?.start()
+        }
       }
     }
   }
@@ -284,18 +287,22 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
     isWaiting = 3
   }
   
-  public func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didOpenWithProtocol protocol: String?) {
-    isConnected = true
-    if !pending.isEmpty {
-      send(Array(pending.values))
+  nonisolated public func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didOpenWithProtocol protocol: String?) {
+    Task { @MainActor in
+      isConnected = true
+      if !pending.isEmpty {
+        send(Array(pending.values))
+      }
     }
     DispatchQueue.main.async { [weak self] in
       self?.onOpen?()
     }
   }
   
-  public func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didCloseWith closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
-    disconnected()
+  nonisolated public func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didCloseWith closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
+    Task { @MainActor in
+      disconnected()
+    }
   }
   private struct AnyEncodable: Encodable, @unchecked Sendable {
     let body: Encodable
@@ -304,10 +311,10 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
       try container.encode(body)
     }
   }
-  private var subscribed = [String: [Int: (AnyBody) -> Void]]()
+  private var subscribed = [String: [Int: @MainActor (AnyBody) -> Void]]()
   private var nextEventId = 0
   
-  public func addTopic(topic: String, event: @escaping (AnyBody) -> Void) -> @Sendable () -> Bool {
+  public func addTopic(topic: String, event: @escaping @Sendable @MainActor (AnyBody) -> Void) -> @Sendable @MainActor () -> Bool {
     let id = nextEventId
     nextEventId += 1
     

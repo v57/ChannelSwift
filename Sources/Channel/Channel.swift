@@ -9,6 +9,7 @@ import Foundation
 
 // MARK: - Protocols
 
+@MainActor
 public protocol Controller: Sendable {
   associatedtype State
   func respond(_ response: Encodable & Sendable)
@@ -18,15 +19,17 @@ public protocol Controller: Sendable {
   var sender: any Sender { get }
   var state: State { get }
 }
+@MainActor
 protocol StreamRequestProtocol: Sendable { }
 
+@MainActor
 public protocol ConnectionInterface: Sendable {
   @discardableResult
   func send<Body: Encodable>(_ body: Body) -> Int
   func sent(_ id: Int)
   func cancel(_ id: Int) -> Bool
   func notify<Body: Encodable>(_ body: Body)
-  func addTopic(topic: String, event: @escaping (AnyBody) -> Void) -> @Sendable () -> Bool
+  func addTopic(topic: String, event: @escaping @MainActor (AnyBody) -> Void) -> @Sendable @MainActor () -> Bool
   func stop()
 }
 
@@ -165,14 +168,15 @@ public struct ChannelError: Error, CustomStringConvertible, Codable, Sendable {
 
 public struct PendingRequest: Sendable {
   public let request: Encodable & Sendable
-  public let onResponse: @Sendable (ReceivedResponse) -> Void
-  public init(request: Encodable & Sendable, response: @escaping @Sendable (ReceivedResponse) -> Void) {
+  public let onResponse: @Sendable @MainActor (ReceivedResponse) -> Void
+  public init(request: Encodable & Sendable, response: @escaping @Sendable @MainActor (ReceivedResponse) -> Void) {
     self.request = request
     self.onResponse = response
   }
 }
 
 // MARK: - Channel
+@MainActor
 public class Channel<State: Sendable>: @unchecked Sendable {
   private var id = 0
   public var requests: [Int: PendingRequest] = [:]
@@ -270,7 +274,7 @@ public class Channel<State: Sendable>: @unchecked Sendable {
     return self
   }
   
-  public func makeRequest<Body: Encodable>(_ path: String, _ body: Body?, response: @escaping @Sendable (ReceivedResponse) -> Void) -> Request<Body> {
+  public func makeRequest<Body: Encodable>(_ path: String, _ body: Body?, response: @escaping @Sendable @MainActor (ReceivedResponse) -> Void) -> Request<Body> {
     let id = self.id
     self.id += 1
     let pending = PendingRequest(request: Request(id: id, path: path, body: body), response: response)
@@ -278,7 +282,7 @@ public class Channel<State: Sendable>: @unchecked Sendable {
     return Request(id: id, path: path, body: body)
   }
   
-  public func makeStream<Body: Encodable>(_ stream: String, _ body: Body?, response: @escaping @Sendable (ReceivedResponse) -> Void) -> StreamRequest<Body> {
+  public func makeStream<Body: Encodable>(_ stream: String, _ body: Body?, response: @escaping @Sendable @MainActor (ReceivedResponse) -> Void) -> StreamRequest<Body> {
     let id = self.id
     self.id += 1
     let pending = PendingRequest(request: StreamRequest(id: id, stream: stream, body: body), response: response)
@@ -286,7 +290,7 @@ public class Channel<State: Sendable>: @unchecked Sendable {
     return StreamRequest(id: id, stream: stream, body: body)
   }
   
-  public func makeSubscription<Body: Encodable>(_ sub: String, _ body: Body?, response: @escaping @Sendable (ReceivedResponse) -> Void) -> SubscriptionRequest<Body> {
+  public func makeSubscription<Body: Encodable>(_ sub: String, _ body: Body?, response: @escaping @Sendable @MainActor (ReceivedResponse) -> Void) -> SubscriptionRequest<Body> {
     let id = self.id
     self.id += 1
     let pending = PendingRequest(request: SubscriptionRequest(id: id, sub: sub, body: body), response: response)
@@ -432,7 +436,7 @@ public protocol Sender: Sendable {
   @MainActor
   func values<Body: Encodable, Output: Decodable>(_ path: String, _ body: Body?) -> Values<State, Body, Output>
   @MainActor
-  func subscribe<Body: Encodable & Sendable>(_ path: String, _ body: Body?, event: @escaping @Sendable (AnyBody) -> Void) async throws -> _Cancellable
+  func subscribe<Body: Encodable & Sendable>(_ path: String, _ body: Body?, event: @escaping @Sendable @MainActor (AnyBody) -> Void) async throws -> _Cancellable
   @MainActor
   func stop()
 }
@@ -449,7 +453,7 @@ public extension ProxySender {
   func values<Body: Encodable, Output: Decodable>(_ path: String, _ body: Body?) -> Values<State, Body, Output> {
     sender.values(path, body)
   }
-  func subscribe<Body: Encodable & Sendable>(_ path: String, _ body: Body?, event: @escaping @Sendable (AnyBody) -> Void) async throws -> _Cancellable {
+  func subscribe<Body: Encodable & Sendable>(_ path: String, _ body: Body?, event: @escaping @Sendable @MainActor (AnyBody) -> Void) async throws -> _Cancellable {
     try await sender.subscribe(path, body, event: event)
   }
   func stop() {
@@ -470,11 +474,11 @@ public extension Sender {
   func values<Output: Decodable>(_ path: String, as: Output.Type = Output.self) -> Values<State, EmptyCodable, Output> {
     values(path, Optional<EmptyCodable>.none)
   }
-  func subscribe(_ path: String, event: @escaping @Sendable (AnyBody) -> Void) async throws -> _Cancellable {
+  func subscribe(_ path: String, event: @escaping @Sendable @MainActor (AnyBody) -> Void) async throws -> _Cancellable {
     try await subscribe(path, Optional<EmptyCodable>.none, event: event)
   }
 }
-
+@MainActor
 public struct ChannelSender<State: Sendable>: Sender, @unchecked Sendable {
   let ch: Channel<State>
   let connection: ConnectionInterface
@@ -516,7 +520,7 @@ public struct ChannelSender<State: Sendable>: Sender, @unchecked Sendable {
     })
   }
   
-  public func subscribe<Body: Encodable & Sendable>(_ path: String, _ body: Body?, event: @escaping @Sendable (AnyBody) -> Void) async throws -> _Cancellable {
+  public func subscribe<Body: Encodable & Sendable>(_ path: String, _ body: Body?, event: @escaping @Sendable @MainActor (AnyBody) -> Void) async throws -> _Cancellable {
     return try await withCheckedThrowingContinuation { continuation in
       let request = self.ch.makeSubscription(path, body) { response in
         if let error = response.error {
@@ -525,9 +529,11 @@ public struct ChannelSender<State: Sendable>: Sender, @unchecked Sendable {
           let topic = response.topic ?? ""
           let cancelClosure = self.connection.addTopic(topic: topic, event: event)
           let cancellable = _AnyCancellable {
-            let cancelled = cancelClosure()
-            if cancelled {
-              self.connection.notify(["unsub": topic])
+            Task { @MainActor in
+              let cancelled = cancelClosure()
+              if cancelled {
+                self.connection.notify(["unsub": topic])
+              }
             }
           }
           continuation.resume(returning: cancellable)
@@ -543,7 +549,8 @@ public struct ChannelSender<State: Sendable>: Sender, @unchecked Sendable {
 }
 
 // MARK: - Stream
-public class Values<State: Sendable, Body: Encodable & Sendable, Output: Decodable>: AsyncSequence, AsyncIteratorProtocol, @unchecked Sendable {
+@MainActor
+public class Values<State: Sendable, Body: Encodable & Sendable, Output: Decodable & Sendable>: AsyncSequence, AsyncIteratorProtocol, @unchecked Sendable {
   public typealias Element = Output
   
   private let ch: Channel<State>
@@ -553,10 +560,10 @@ public class Values<State: Sendable, Body: Encodable & Sendable, Output: Decodab
   private var pending: [((ReceivedResponse) -> Void)] = []
   private var queued: [ReceivedResponse] = []
   private var rid: Int?
-  private let onSend: @Sendable (StreamRequest<Body>) -> Void
+  private let onSend: @Sendable @MainActor (StreamRequest<Body>) -> Void
   private let onCancel: (Int) -> Void
   
-  init(ch: Channel<State>, path: String, body: Body?, onSend: @escaping @Sendable (StreamRequest<Body>) -> Void, onCancel: @escaping (Int) -> Void) {
+  init(ch: Channel<State>, path: String, body: Body?, onSend: @escaping @Sendable @MainActor (StreamRequest<Body>) -> Void, onCancel: @escaping (Int) -> Void) {
     self.ch = ch
     self.path = path
     self.body = body
@@ -598,13 +605,15 @@ public class Values<State: Sendable, Body: Encodable & Sendable, Output: Decodab
           }
         }
       } onCancel: {
-        if let rid {
-          onCancel(rid)
+        Task { @MainActor in
+          if let rid {
+            onCancel(rid)
+          }
         }
       }
     }
   }
-  public func makeAsyncIterator() -> Values {
+  nonisolated public func makeAsyncIterator() -> Values {
     return self
   }
 }

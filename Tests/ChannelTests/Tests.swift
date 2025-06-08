@@ -6,6 +6,7 @@ func sleep(seconds: Double = 0.001) async {
 }
 @MainActor
 var valuesSent = 0
+@MainActor
 let channel = Channel<Void>()
   .post("hello") { "client world" }
   .stream("stream/values") { c in
@@ -26,6 +27,7 @@ let channel = Channel<Void>()
     c.finish()
   }
 
+@MainActor
 let client = channel.connect(2049)
 
 @Test("hello")
