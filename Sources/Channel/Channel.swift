@@ -590,10 +590,14 @@ public class Values<State: Sendable, Body: Encodable & Sendable, Output: Decodab
     if !queued.isEmpty {
       return try queued.removeFirst().parseStream()
     } else {
+      var cancel: (@Sendable () -> ())?
+      var isCancelled = false
       return try await withTaskCancellationHandler {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Element?, Error>) in
+          cancel = { continuation.resume(throwing: CancellationError()) }
           DispatchQueue.main.async {
             self.pending.append { response in
+              guard !isCancelled else { return }
               do {
                 let value: Element? = try response.parseStream()
                 continuation.resume(returning: value)
@@ -607,7 +611,9 @@ public class Values<State: Sendable, Body: Encodable & Sendable, Output: Decodab
       } onCancel: {
         Task { @MainActor in
           if let rid {
+            isCancelled = true
             onCancel(rid)
+            cancel?()
           }
         }
       }
