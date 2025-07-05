@@ -515,6 +515,7 @@ public struct ChannelSender<State: Sendable>: Sender, @unchecked Sendable {
       rid.value = self.connection.send(req)
     } onCancel: { id in
       if let existing = rid.value, !self.connection.cancel(existing) {
+        _ = self.connection.cancel(existing)
         _ = self.connection.notify(["cancel": id])
       }
     } onComplete: {
@@ -561,12 +562,13 @@ public class Values<State: Sendable, Body: Encodable & Sendable, Output: Decodab
   private let path: String
   private let body: Body?
   private var isRunning = false
-  private var pending: [((ReceivedResponse) -> Void)] = []
-  private var queued: [ReceivedResponse] = []
+  private var pending: [((Result<Element?, Error>) -> Void)] = []
+  private var queued: [Result<Element?, Error>] = []
   private var rid: Int?
   private let onSend: @Sendable @MainActor (StreamRequest<Body>) -> Void
   private let onCancel: (Int) -> Void
   private let onComplete: () -> Void
+  private var isCompleted: Bool = false
   
   init(ch: Channel<State>, path: String, body: Body?, onSend: @escaping @Sendable @MainActor (StreamRequest<Body>) -> Void, onCancel: @escaping (Int) -> Void, onComplete: @escaping () -> Void) {
     self.ch = ch
@@ -581,11 +583,12 @@ public class Values<State: Sendable, Body: Encodable & Sendable, Output: Decodab
     if self.isRunning { return }
     self.isRunning = true
     let request = self.ch.makeStream(self.path, self.body) { response in
+      let result = Result<Element?, Error> { try response.parseStream() }
       if !self.pending.isEmpty {
         let pendingClosure = self.pending.removeFirst()
-        pendingClosure(response)
+        pendingClosure(result)
       } else {
-        self.queued.append(response)
+        self.queued.append(result)
       }
     }
     self.rid = request.id
@@ -596,6 +599,7 @@ public class Values<State: Sendable, Body: Encodable & Sendable, Output: Decodab
     do {
       let value = try await _next()
       if value == nil {
+        isCompleted = true
         onComplete()
       }
       return value
@@ -606,7 +610,7 @@ public class Values<State: Sendable, Body: Encodable & Sendable, Output: Decodab
   }
   private func _next() async throws -> Element? {
     if !queued.isEmpty {
-      return try queued.removeFirst().parseStream()
+      return try queued.removeFirst().get()
     } else {
       var cancel: (@Sendable () -> ())?
       var isCancelled = false
@@ -614,16 +618,15 @@ public class Values<State: Sendable, Body: Encodable & Sendable, Output: Decodab
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Element?, Error>) in
           cancel = { continuation.resume(throwing: CancellationError()) }
           DispatchQueue.main.async {
-            self.pending.append { response in
-              guard !isCancelled else { return }
-              do {
-                let value: Element? = try response.parseStream()
-                continuation.resume(returning: value)
-              } catch {
-                continuation.resume(throwing: error)
+            if self.queued.count > 0 {
+              continuation.resume(with: self.queued.removeFirst())
+            } else {
+              self.pending.append { response in
+                guard !isCancelled else { return }
+                continuation.resume(with: response)
               }
+              self.start()
             }
-            self.start()
           }
         }
       } onCancel: {
