@@ -510,19 +510,7 @@ public struct ChannelSender<State: Sendable>: Sender, @unchecked Sendable {
   }
   
   public func values<Body: Encodable, Output: Decodable>(_ path: String, _ body: Body?) -> Values<State, Body, Output> {
-    let rid = UnsafeMutable<Int?>(nil)
-    return Values(ch: ch, path: path, body: body) { req in
-      rid.value = self.connection.send(req)
-    } onCancel: { id in
-      if let existing = rid.value, !self.connection.cancel(existing) {
-        _ = self.connection.cancel(existing)
-        _ = self.connection.notify(["cancel": id])
-      }
-    } onComplete: {
-      if let rid = rid.value {
-        _ = self.connection.cancel(rid)
-      }
-    }
+    Values(ch: ch, path: path, body: body, connection: connection)
   }
   
   public func subscribe<Body: Encodable & Sendable>(_ path: String, _ body: Body?, event: @escaping @Sendable @MainActor (AnyBody) -> Void) async throws -> _Cancellable {
@@ -561,22 +549,31 @@ public class Values<State: Sendable, Body: Encodable & Sendable, Output: Decodab
   private let ch: Channel<State>
   private let path: String
   private let body: Body?
+  private let connection: ConnectionInterface
   private var isRunning = false
   private var pending: [((Result<Element?, Error>) -> Void)] = []
   private var queued: [Result<Element?, Error>] = []
   private var rid: Int?
-  private let onSend: @Sendable @MainActor (StreamRequest<Body>) -> Void
-  private let onCancel: (Int) -> Void
-  private let onComplete: () -> Void
   private var isCompleted: Bool = false
+  private var connectionRequestId: Int?
   
-  init(ch: Channel<State>, path: String, body: Body?, onSend: @escaping @Sendable @MainActor (StreamRequest<Body>) -> Void, onCancel: @escaping (Int) -> Void, onComplete: @escaping () -> Void) {
+  init(ch: Channel<State>, path: String, body: Body?, connection: ConnectionInterface) {
     self.ch = ch
     self.path = path
     self.body = body
-    self.onSend = onSend
-    self.onCancel = onCancel
-    self.onComplete = onComplete
+    self.connection = connection
+  }
+  
+  private func onCancel(id: Int) {
+    if let connectionRequestId, !self.connection.cancel(connectionRequestId) {
+      _ = self.connection.notify(["cancel": id])
+    }
+  }
+  
+  private func onComplete() {
+    if let connectionRequestId {
+      _ = self.connection.cancel(connectionRequestId)
+    }
   }
   
   private func start() {
@@ -592,7 +589,7 @@ public class Values<State: Sendable, Body: Encodable & Sendable, Output: Decodab
       }
     }
     self.rid = request.id
-    self.onSend(request)
+    connectionRequestId = self.connection.send(body)
   }
   
   public func next() async throws -> Element? {
@@ -633,7 +630,7 @@ public class Values<State: Sendable, Body: Encodable & Sendable, Output: Decodab
         Task { @MainActor in
           if let rid {
             isCancelled = true
-            onCancel(rid)
+            onCancel(id: rid)
             cancel?()
           }
         }
