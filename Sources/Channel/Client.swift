@@ -291,7 +291,7 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
     Task { @MainActor in
       isConnected = true
       if !pending.isEmpty {
-        send(Array(pending.values))
+        trySend(Array(pending.values))
       }
     }
     DispatchQueue.main.async { [weak self] in
