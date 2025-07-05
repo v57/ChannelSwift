@@ -511,13 +511,17 @@ public struct ChannelSender<State: Sendable>: Sender, @unchecked Sendable {
   
   public func values<Body: Encodable, Output: Decodable>(_ path: String, _ body: Body?) -> Values<State, Body, Output> {
     let rid = UnsafeMutable<Int?>(nil)
-    return Values(ch: ch, path: path, body: body, onSend: { req in
+    return Values(ch: ch, path: path, body: body) { req in
       rid.value = self.connection.send(req)
-    }, onCancel: { id in
+    } onCancel: { id in
       if let existing = rid.value, !self.connection.cancel(existing) {
-        _ = self.connection.send(["cancel": id])
+        _ = self.connection.notify(["cancel": id])
       }
-    })
+    } onComplete: {
+      if let rid = rid.value {
+        _ = self.connection.cancel(rid)
+      }
+    }
   }
   
   public func subscribe<Body: Encodable & Sendable>(_ path: String, _ body: Body?, event: @escaping @Sendable @MainActor (AnyBody) -> Void) async throws -> _Cancellable {
@@ -562,13 +566,15 @@ public class Values<State: Sendable, Body: Encodable & Sendable, Output: Decodab
   private var rid: Int?
   private let onSend: @Sendable @MainActor (StreamRequest<Body>) -> Void
   private let onCancel: (Int) -> Void
+  private let onComplete: () -> Void
   
-  init(ch: Channel<State>, path: String, body: Body?, onSend: @escaping @Sendable @MainActor (StreamRequest<Body>) -> Void, onCancel: @escaping (Int) -> Void) {
+  init(ch: Channel<State>, path: String, body: Body?, onSend: @escaping @Sendable @MainActor (StreamRequest<Body>) -> Void, onCancel: @escaping (Int) -> Void, onComplete: @escaping () -> Void) {
     self.ch = ch
     self.path = path
     self.body = body
     self.onSend = onSend
     self.onCancel = onCancel
+    self.onComplete = onComplete
   }
   
   private func start() {
@@ -587,6 +593,18 @@ public class Values<State: Sendable, Body: Encodable & Sendable, Output: Decodab
   }
   
   public func next() async throws -> Element? {
+    do {
+      let value = try await _next()
+      if value == nil {
+        onComplete()
+      }
+      return value
+    } catch {
+      onComplete()
+      throw error
+    }
+  }
+  private func _next() async throws -> Element? {
     if !queued.isEmpty {
       return try queued.removeFirst().parseStream()
     } else {

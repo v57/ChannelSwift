@@ -126,6 +126,7 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
   public var onOpen: (() -> Void)?
   public var onMessage: (([ReceivedResponse]) -> Void)?
   public var debug: Bool = false
+  public var pendingCount: Int { pending.count }
   private var pending = [Int: AnyEncodable]()
   private var isWaiting = 0
   private var isWaitingLength = 0
@@ -269,10 +270,7 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
   }
   
   public func cancel(_ id: Int) -> Bool {
-    if isConnected { return false }
-    if pending[id] == nil { return false }
-    pending.removeValue(forKey: id)
-    return true
+    pending.removeValue(forKey: id) != nil && !isConnected
   }
   
   public func notify<Body: Encodable & Sendable>(_ body: Body) {
