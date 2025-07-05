@@ -542,8 +542,25 @@ public struct ChannelSender<State: Sendable>: Sender, @unchecked Sendable {
 }
 
 // MARK: - Stream
-@MainActor
-public class Values<State: Sendable, Body: Encodable & Sendable, Output: Decodable & Sendable>: AsyncSequence, AsyncIteratorProtocol, @unchecked Sendable {
+public struct Values<State: Sendable, Body: Encodable & Sendable, Output: Decodable & Sendable>: AsyncSequence, @unchecked Sendable {
+  public typealias Element = Output
+  private let ch: Channel<State>
+  private let path: String
+  private let body: Body?
+  private let connection: ConnectionInterface
+  init(ch: Channel<State>, path: String, body: Body?, connection: ConnectionInterface) {
+    self.ch = ch
+    self.path = path
+    self.body = body
+    self.connection = connection
+  }
+  public func makeAsyncIterator() -> ValuesIterator<State, Body, Output> {
+    ValuesIterator(ch: ch, path: path, body: body, connection: connection)
+  }
+}
+
+
+public class ValuesIterator<State: Sendable, Body: Encodable & Sendable, Output: Decodable & Sendable>: AsyncIteratorProtocol, @unchecked Sendable {
   public typealias Element = Output
   
   private let ch: Channel<State>
@@ -564,22 +581,27 @@ public class Values<State: Sendable, Body: Encodable & Sendable, Output: Decodab
     self.connection = connection
   }
   
+  @MainActor
   private func onCancel(id: Int) {
+    isCompleted = true
     if let connectionRequestId, !self.connection.cancel(connectionRequestId) {
-      _ = self.connection.notify(["cancel": id])
+      _ = self.connection.notify(CancellationRequest(cancel: connectionRequestId))
     }
   }
   
+  @MainActor
   private func onComplete() {
+    isCompleted = true
     if let connectionRequestId {
       _ = self.connection.cancel(connectionRequestId)
     }
   }
   
+  @MainActor
   private func start() {
     if self.isRunning { return }
     self.isRunning = true
-    let request = self.ch.makeStream(self.path, self.body) { response in
+    let request = self.ch.makeStream(path, body) { response in
       let result = Result<Element?, Error> { try response.parseStream() }
       if !self.pending.isEmpty {
         let pendingClosure = self.pending.removeFirst()
@@ -589,14 +611,14 @@ public class Values<State: Sendable, Body: Encodable & Sendable, Output: Decodab
       }
     }
     self.rid = request.id
-    connectionRequestId = self.connection.send(body)
+    connectionRequestId = self.connection.send(request)
   }
   
+  @MainActor
   public func next() async throws -> Element? {
     do {
       let value = try await _next()
       if value == nil {
-        isCompleted = true
         onComplete()
       }
       return value
@@ -605,6 +627,7 @@ public class Values<State: Sendable, Body: Encodable & Sendable, Output: Decodab
       throw error
     }
   }
+  @MainActor
   private func _next() async throws -> Element? {
     if !queued.isEmpty {
       return try queued.removeFirst().get()
@@ -637,8 +660,15 @@ public class Values<State: Sendable, Body: Encodable & Sendable, Output: Decodab
       }
     }
   }
-  nonisolated public func makeAsyncIterator() -> Values {
-    return self
+  deinit {
+    if !isCompleted, let connectionRequestId {
+      let c = connection
+      Task { @MainActor in
+        if !c.cancel(connectionRequestId) {
+          _ = c.notify(CancellationRequest(cancel: connectionRequestId))
+        }
+      }
+    }
   }
 }
 private extension ReceivedResponse {
@@ -736,6 +766,9 @@ public class Subscription<Input: Decodable, Output: Encodable & Sendable>: Subsc
 
 
 // MARK: - Codable
+private struct CancellationRequest: Encodable {
+  var cancel: Int
+}
 public struct AnyBody: @unchecked Sendable {
   private let container: KeyedDecodingContainer<ReceivedResponse.CodingKeys>
   init(container: KeyedDecodingContainer<ReceivedResponse.CodingKeys>) {
