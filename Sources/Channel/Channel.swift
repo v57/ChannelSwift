@@ -196,13 +196,13 @@ public class Channel<State: Sendable>: @unchecked Sendable {
     }
     return self
   }
-  public func post<Input: Decodable, Output: Encodable & Sendable>(_ path: String, request: @escaping (@Sendable (Input) async throws -> Output)) -> Self {
+  public func post<Input: Decodable & Sendable, Output: Encodable & Sendable>(_ path: String, request: @escaping @Sendable (Input) async throws -> Output) -> Self {
     postApi[path] = { body, _ in
       try await request(body.body.body())
     }
     return self
   }
-  public func post<Input: Decodable>(_ path: String, request: @escaping (@Sendable (Input) async throws -> Void)) -> Self {
+  public func post<Input: Decodable & Sendable>(_ path: String, request: @escaping (@Sendable (Input) async throws -> Void)) -> Self {
     postApi[path] = { body, _ in
       try await request(body.body.body())
       return EmptyCodable()
