@@ -568,7 +568,7 @@ public class ValuesIterator<State: Sendable, Body: Encodable & Sendable, Output:
   private let body: Body?
   private let connection: ConnectionInterface
   private var isRunning = false
-  private var pending: [((Result<Element?, Error>) -> Void)] = []
+  private var pending: [(@MainActor (Result<Element?, Error>) -> Void)] = []
   private var queued: [Result<Element?, Error>] = []
   private var rid: Int?
   private var isCompleted: Bool = false
@@ -632,21 +632,25 @@ public class ValuesIterator<State: Sendable, Body: Encodable & Sendable, Output:
     if !queued.isEmpty {
       return try queued.removeFirst().get()
     } else {
-      var cancel: (@Sendable () -> ())?
+      var cancel: (@MainActor @Sendable () -> ())?
       var isCancelled = false
+      var isSent = false
       return try await withTaskCancellationHandler {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Element?, Error>) in
-          cancel = { continuation.resume(throwing: CancellationError()) }
-          DispatchQueue.main.async {
-            if self.queued.count > 0 {
-              continuation.resume(with: self.queued.removeFirst())
-            } else {
-              self.pending.append { response in
-                guard !isCancelled else { return }
-                continuation.resume(with: response)
-              }
-              self.start()
+          cancel = {
+            if !isSent {
+              continuation.resume(throwing: CancellationError())
             }
+          }
+          if self.queued.count > 0 {
+            continuation.resume(with: self.queued.removeFirst())
+          } else {
+            self.pending.append { response in
+              guard !isCancelled else { return }
+              isSent = true
+              continuation.resume(with: response)
+            }
+            self.start()
           }
         }
       } onCancel: {
