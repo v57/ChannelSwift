@@ -53,8 +53,9 @@ public struct AnonymousBody<State: Sendable>: Sendable {
   public var sender: any Sender
   public var state: State
 }
-public struct Body<Body: Decodable & Sendable, State: Sendable>: Sendable {
+public struct Body<Body: Decodable & Sendable, Context: Decodable & Sendable, State: Sendable>: Sendable {
   public var body: Body
+  public var context: Context
   public var sender: any Sender
   public var state: State
 }
@@ -129,7 +130,7 @@ public struct ReceivedResponse: Decodable, @unchecked Sendable {
   var anyBody: AnyBody { AnyBody(container: container) }
   
   enum CodingKeys: CodingKey {
-    case id, path, body, stream, cancel, sub, unsub, topic, done, error
+    case id, path, body, context, stream, cancel, sub, unsub, topic, done, error
   }
   
   public init(from decoder: any Decoder) throws {
@@ -196,9 +197,9 @@ public class Channel<State: Sendable>: @unchecked Sendable {
   
   public init() { }
   
-  public func post<Input: Decodable, Output: Encodable & Sendable>(_ path: String, request: @escaping ( @Sendable (Body<Input, State>) async throws -> Output)) -> Self {
+  public func post<Input: Decodable, Context: Decodable, Output: Encodable & Sendable>(_ path: String, request: @escaping ( @Sendable (Body<Input, Context, State>) async throws -> Output)) -> Self {
     postApi[path] = { body, _ in
-      try await request(Body(body: body.body.body(), sender: body.sender, state: body.state))
+      try await request(Body(body: body.body.body(), context: body.body.context(), sender: body.sender, state: body.state))
     }
     return self
   }
@@ -234,12 +235,12 @@ public class Channel<State: Sendable>: @unchecked Sendable {
     otherPostApi.append((path: path, request: request))
     return self
   }
-  public func stream<Input: Decodable & Sendable>(_ path: String, request: @escaping @Sendable (Body<Input, State>, AsyncThrowingStream<Encodable & Sendable, Error>.Continuation) async throws -> Void) -> Self {
+  public func stream<Input: Decodable & Sendable, Context: Decodable & Sendable>(_ path: String, request: @escaping @Sendable (Body<Input, Context, State>, AsyncThrowingStream<Encodable & Sendable, Error>.Continuation) async throws -> Void) -> Self {
     streamApi[path] = { body, _ in
       AsyncThrowingStream { continuation in
         Task {
           do {
-            try await request(Body(body: body.body.body(), sender: body.sender, state: body.state), continuation)
+            try await request(Body(body: body.body.body(), context: body.body.context(), sender: body.sender, state: body.state), continuation)
             continuation.finish()
           } catch {
             continuation.finish(throwing: error)
@@ -250,7 +251,7 @@ public class Channel<State: Sendable>: @unchecked Sendable {
     return self
   }
   public func stream<Input: Decodable & Sendable>(_ path: String, request: @escaping @Sendable (Input, AsyncThrowingStream<Encodable & Sendable, Error>.Continuation) async throws -> Void) -> Self {
-    stream(path) { body, continuation in
+    stream(path) { (body: Body<Input, EmptyCodable, State>, continuation) in
       try await request(body.body, continuation)
     }
   }
@@ -319,10 +320,10 @@ public class Channel<State: Sendable>: @unchecked Sendable {
       let api: Function<State>? = self.postApi[path] ?? otherPostApi.first(where: { $0.path(path) })?.request
       do {
         guard let api else { throw ChannelError(text: "api not found") }
-        let bodyParam = AnonymousBody(body: AnyBody(container: some.container), sender: controller.sender, state: controller.state)
+        let body = AnonymousBody(body: AnyBody(container: some.container), sender: controller.sender, state: controller.state)
         Task {
           do {
-            let result = try await api(bodyParam, path)
+            let result = try await api(body, path)
             if let id {
               controller.respond(Response(id: id, body: result))
             }
@@ -813,6 +814,13 @@ public struct AnyBody: @unchecked Sendable {
     self.container = container
   }
   func body<Body: Decodable>() throws -> Body {
+    if let optional = Body.self as? any OptionalDecodable.Type {
+      try optional.decode(container, key: .body) as! Body
+    } else {
+      try container.decode(Body.self, forKey: .body)
+    }
+  }
+  func context<Body: Decodable>() throws -> Body {
     if let optional = Body.self as? any OptionalDecodable.Type {
       try optional.decode(container, key: .body) as! Body
     } else {
