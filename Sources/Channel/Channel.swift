@@ -481,6 +481,9 @@ public extension Sender {
   func send(_ path: String) async throws {
     _ = try await send(path, Optional<EmptyCodable>.none, context: Optional<EmptyCodable>.none) as EmptyCodable?
   }
+  func send<Body: Encodable, Output: Decodable>(_ path: String, _ body: Body?) async throws -> Output {
+    try await send(path, body, context: Optional<EmptyCodable>.none)
+  }
   func send<Output: Decodable, Context: Encodable>(_ path: String, context: Context?) async throws -> Output {
     try await send(path, Optional<EmptyCodable>.none, context: context)
   }
@@ -495,6 +498,9 @@ public extension Sender {
   }
   func values<Output: Decodable>(_ path: String, as: Output.Type = Output.self) -> Values<State, EmptyCodable, EmptyCodable, Output> {
     values(path, Optional<EmptyCodable>.none, context: Optional<EmptyCodable>.none)
+  }
+  func values<Context: Encodable, Output: Decodable>(_ path: String, context: Context?) -> Values<State, EmptyCodable, Context, Output> {
+    values(path, Optional<EmptyCodable>.none, context: context)
   }
   func values<Output: Decodable, Context: Encodable>(_ path: String, _ context: Context?, as: Output.Type = Output.self) -> Values<State, EmptyCodable, Context, Output> {
     values(path, Optional<EmptyCodable>.none, context: context)
