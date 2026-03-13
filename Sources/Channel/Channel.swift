@@ -33,6 +33,14 @@ public protocol ConnectionInterface: Sendable {
   func stop()
 }
 
+
+public struct SendOptions<Context: Encodable & Sendable>: Sendable {
+  public var context: Context?
+  public init(context: Context? = nil) {
+    self.context = context
+  }
+}
+
 // MARK: - Types
 public typealias Function<State> = @Sendable (AnonymousBody<State>, String) async throws -> Encodable & Sendable
 public typealias Stream<State> = @Sendable (AnonymousBody<State>, String) -> AsyncThrowingStream<Encodable & Sendable, Error>
@@ -281,28 +289,28 @@ public class Channel<State: Sendable>: @unchecked Sendable {
     return self
   }
   
-  public func makeRequest<Body: Encodable, Context: Encodable>(_ path: String, _ body: Body?, _ context: Context?, response: @escaping @Sendable @MainActor (ReceivedResponse) -> Void) -> Request<Body, Context> {
+  public func makeRequest<Body: Encodable, Context: Encodable>(_ path: String, _ body: Body?, _ options: SendOptions<Context>?, response: @escaping @Sendable @MainActor (ReceivedResponse) -> Void) -> Request<Body, Context> {
     let id = self.id
     self.id += 1
-    let request = Request(id: id, path: path, body: body, context: context)
+    let request = Request(id: id, path: path, body: body, context: options?.context)
     let pending = PendingRequest(request: request, response: response)
     self.requests[id] = pending
     return request
   }
   
-  public func makeStream<Body: Encodable, Context: Encodable>(_ stream: String, _ body: Body?, _ context: Context?, response: @escaping @Sendable @MainActor (ReceivedResponse) -> Void) -> StreamRequest<Body, Context> {
+  public func makeStream<Body: Encodable, Context: Encodable>(_ stream: String, _ body: Body?, _ options: SendOptions<Context>?, response: @escaping @Sendable @MainActor (ReceivedResponse) -> Void) -> StreamRequest<Body, Context> {
     let id = self.id
     self.id += 1
-    let request = StreamRequest(id: id, stream: stream, body: body, context: context)
+    let request = StreamRequest(id: id, stream: stream, body: body, context: options?.context)
     let pending = PendingRequest(request: request, response: response)
     self.requests[id] = pending
     return request
   }
   
-  public func makeSubscription<Body: Encodable, Context: Encodable>(_ sub: String, _ body: Body?, _ context: Context?, response: @escaping @Sendable @MainActor (ReceivedResponse) -> Void) -> SubscriptionRequest<Body, Context> {
+  public func makeSubscription<Body: Encodable, Context: Encodable>(_ sub: String, _ body: Body?, _ options: SendOptions<Context>?, response: @escaping @Sendable @MainActor (ReceivedResponse) -> Void) -> SubscriptionRequest<Body, Context> {
     let id = self.id
     self.id += 1
-    let request = SubscriptionRequest(id: id, sub: sub, body: body, context: context)
+    let request = SubscriptionRequest(id: id, sub: sub, body: body, context: options?.context)
     let pending = PendingRequest(request: request, response: response)
     self.requests[id] = pending
     return request
@@ -442,11 +450,11 @@ public class Channel<State: Sendable>: @unchecked Sendable {
 public protocol Sender: Sendable {
   associatedtype State: Sendable
   @MainActor
-  func send<Body: Encodable, Context: Encodable, Output: Decodable>(_ path: String, _ body: Body?, context: Context?) async throws -> Output
+  func send<Body: Encodable, Context: Encodable, Output: Decodable>(_ path: String, _ body: Body?, options: SendOptions<Context>?) async throws -> Output
   @MainActor
-  func values<Body: Encodable, Context: Encodable, Output: Decodable>(_ path: String, _ body: Body?, context: Context?) -> Values<State, Body, Context, Output>
+  func values<Body: Encodable, Context: Encodable, Output: Decodable>(_ path: String, _ body: Body?, options: SendOptions<Context>?) -> Values<State, Body, Context, Output>
   @MainActor
-  func subscribe<Body: Encodable & Sendable, Context: Encodable & Sendable>(_ path: String, _ body: Body?, context: Context?, event: @escaping @Sendable @MainActor (AnyBody) -> Void) async throws -> _Cancellable
+  func subscribe<Body: Encodable & Sendable, Context: Encodable & Sendable>(_ path: String, _ body: Body?, options: SendOptions<Context>?, event: @escaping @Sendable @MainActor (AnyBody) -> Void) async throws -> _Cancellable
   @MainActor
   func stop()
 }
@@ -457,14 +465,14 @@ public protocol ProxySender: Sender where ParentSender.State == State {
 
 @MainActor
 public extension ProxySender {
-  func send<Body: Encodable, Context: Encodable, Output: Decodable>(_ path: String, _ body: Body?, context: Context?) async throws -> Output {
-    try await sender.send(path, body, context: context)
+  func send<Body: Encodable, Context: Encodable, Output: Decodable>(_ path: String, _ body: Body?, options: SendOptions<Context>?) async throws -> Output {
+    try await sender.send(path, body, options: options)
   }
-  func values<Body: Encodable, Context: Encodable, Output: Decodable>(_ path: String, _ body: Body?, context: Context?) -> Values<State, Body, Context, Output> {
-    sender.values(path, body, context: context)
+  func values<Body: Encodable, Context: Encodable, Output: Decodable>(_ path: String, _ body: Body?, options: SendOptions<Context>?) -> Values<State, Body, Context, Output> {
+    sender.values(path, body, options: options)
   }
-  func subscribe<Body: Encodable & Sendable, Context: Encodable & Sendable>(_ path: String, _ body: Body?, context: Context?, event: @escaping @Sendable @MainActor (AnyBody) -> Void) async throws -> _Cancellable {
-    try await sender.subscribe(path, body, context: context, event: event)
+  func subscribe<Body: Encodable & Sendable, Context: Encodable & Sendable>(_ path: String, _ body: Body?, options: SendOptions<Context>?, event: @escaping @Sendable @MainActor (AnyBody) -> Void) async throws -> _Cancellable {
+    try await sender.subscribe(path, body, options: options, event: event)
   }
   func stop() {
     sender.stop()
@@ -473,46 +481,46 @@ public extension ProxySender {
 @MainActor
 public extension Sender {
   func send<Output: Decodable>(_ path: String) async throws -> Output {
-    try await send(path, Optional<EmptyCodable>.none, context: Optional<EmptyCodable>.none)
+    try await send(path, Optional<EmptyCodable>.none, options: Optional<SendOptions<EmptyCodable>>.none)
   }
   func send<Body: Encodable>(_ path: String, _ body: Body?) async throws {
-    _ = try await send(path, body, context: Optional<EmptyCodable>.none) as EmptyCodable?
+    _ = try await send(path, body, options: Optional<SendOptions<EmptyCodable>>.none) as EmptyCodable?
   }
   func send(_ path: String) async throws {
-    _ = try await send(path, Optional<EmptyCodable>.none, context: Optional<EmptyCodable>.none) as EmptyCodable?
+    _ = try await send(path, Optional<EmptyCodable>.none, options: Optional<SendOptions<EmptyCodable>>.none) as EmptyCodable?
   }
   func send<Body: Encodable, Output: Decodable>(_ path: String, _ body: Body?) async throws -> Output {
-    try await send(path, body, context: Optional<EmptyCodable>.none)
+    try await send(path, body, options: Optional<SendOptions<EmptyCodable>>.none)
   }
-  func send<Output: Decodable, Context: Encodable>(_ path: String, context: Context?) async throws -> Output {
-    try await send(path, Optional<EmptyCodable>.none, context: context)
+  func send<Output: Decodable, Context: Encodable>(_ path: String, options: SendOptions<Context>?) async throws -> Output {
+    try await send(path, Optional<EmptyCodable>.none, options: options)
   }
-  func send<Body: Encodable, Context: Encodable>(_ path: String, _ body: Body?, context: Context?) async throws {
-    _ = try await send(path, body, context: context) as EmptyCodable?
+  func send<Body: Encodable, Context: Encodable>(_ path: String, _ body: Body?, options: SendOptions<Context>?) async throws {
+    _ = try await send(path, body, options: options) as EmptyCodable?
   }
-  func send<Context: Encodable>(_ path: String, context: Context?) async throws {
-    _ = try await send(path, Optional<EmptyCodable>.none, context: context) as EmptyCodable?
+  func send<Context: Encodable>(_ path: String, options: SendOptions<Context>?) async throws {
+    _ = try await send(path, Optional<EmptyCodable>.none, options: options) as EmptyCodable?
   }
   func values<Body: Encodable, Output: Decodable>(_ path: String, _ body: Body?) -> Values<State, Body, EmptyCodable, Output> {
-    values(path, body, context: Optional<EmptyCodable>.none)
+    values(path, body, options: Optional<SendOptions<EmptyCodable>>.none)
   }
   func values<Output: Decodable>(_ path: String, as: Output.Type = Output.self) -> Values<State, EmptyCodable, EmptyCodable, Output> {
-    values(path, Optional<EmptyCodable>.none, context: Optional<EmptyCodable>.none)
+    values(path, Optional<EmptyCodable>.none, options: Optional<SendOptions<EmptyCodable>>.none)
   }
-  func values<Context: Encodable, Output: Decodable>(_ path: String, context: Context?) -> Values<State, EmptyCodable, Context, Output> {
-    values(path, Optional<EmptyCodable>.none, context: context)
+  func values<Context: Encodable, Output: Decodable>(_ path: String, options: SendOptions<Context>?) -> Values<State, EmptyCodable, Context, Output> {
+    values(path, Optional<EmptyCodable>.none, options: options)
   }
-  func values<Output: Decodable, Context: Encodable>(_ path: String, _ context: Context?, as: Output.Type = Output.self) -> Values<State, EmptyCodable, Context, Output> {
-    values(path, Optional<EmptyCodable>.none, context: context)
+  func values<Output: Decodable, Context: Encodable>(_ path: String, _ options: SendOptions<Context>?, as: Output.Type = Output.self) -> Values<State, EmptyCodable, Context, Output> {
+    values(path, Optional<EmptyCodable>.none, options: options)
   }
-  func subscribe<Context: Encodable & Sendable>(_ path: String, context: Context?, event: @escaping @Sendable @MainActor (AnyBody) -> Void) async throws -> _Cancellable {
-    try await subscribe(path, Optional<EmptyCodable>.none, context: context, event: event)
+  func subscribe<Context: Encodable & Sendable>(_ path: String, options: SendOptions<Context>?, event: @escaping @Sendable @MainActor (AnyBody) -> Void) async throws -> _Cancellable {
+    try await subscribe(path, Optional<EmptyCodable>.none, options: options, event: event)
   }
   func subscribe<Body: Encodable & Sendable>(_ path: String, _ body: Body?, event: @escaping @Sendable @MainActor (AnyBody) -> Void) async throws -> _Cancellable {
-    try await subscribe(path, body, context: Optional<EmptyCodable>.none, event: event)
+    try await subscribe(path, body, options: Optional<SendOptions<EmptyCodable>>.none, event: event)
   }
   func subscribe(_ path: String, event: @escaping @Sendable @MainActor (AnyBody) -> Void) async throws -> _Cancellable {
-    try await subscribe(path, Optional<EmptyCodable>.none, context: Optional<EmptyCodable>.none, event: event)
+    try await subscribe(path, Optional<EmptyCodable>.none, options: Optional<SendOptions<EmptyCodable>>.none, event: event)
   }
 }
 @MainActor
@@ -525,10 +533,10 @@ public struct ChannelSender<State: Sendable>: Sender, @unchecked Sendable {
     self.connection = connection
   }
   
-  public func send<Body: Encodable & Sendable, Context: Encodable & Sendable, Output: Decodable>(_ path: String, _ body: Body?, context: Context?) async throws -> Output {
+  public func send<Body: Encodable & Sendable, Context: Encodable & Sendable, Output: Decodable>(_ path: String, _ body: Body?, options: SendOptions<Context>?) async throws -> Output {
     return try await withCheckedThrowingContinuation { continuation in
       let id = UnsafeMutable<Int?>(nil)
-      let request = self.ch.makeRequest(path, body, context) { response in
+      let request = self.ch.makeRequest(path, body, options) { response in
         if let error = response.error {
           continuation.resume(throwing: ChannelError(text: error))
         } else {
@@ -546,13 +554,13 @@ public struct ChannelSender<State: Sendable>: Sender, @unchecked Sendable {
     }
   }
   
-  public func values<Body: Encodable, Context: Encodable, Output: Decodable>(_ path: String, _ body: Body?, context: Context?) -> Values<State, Body, Context, Output> {
-    Values(ch: ch, path: path, body: body, context: context, connection: connection)
+  public func values<Body: Encodable, Context: Encodable, Output: Decodable>(_ path: String, _ body: Body?, options: SendOptions<Context>?) -> Values<State, Body, Context, Output> {
+    Values(ch: ch, path: path, body: body, options: options, connection: connection)
   }
   
-  public func subscribe<Body: Encodable & Sendable, Context: Encodable & Sendable>(_ path: String, _ body: Body?, context: Context?, event: @escaping @Sendable @MainActor (AnyBody) -> Void) async throws -> _Cancellable {
+  public func subscribe<Body: Encodable & Sendable, Context: Encodable & Sendable>(_ path: String, _ body: Body?, options: SendOptions<Context>?, event: @escaping @Sendable @MainActor (AnyBody) -> Void) async throws -> _Cancellable {
     return try await withCheckedThrowingContinuation { continuation in
-      let request = self.ch.makeSubscription(path, body, context) { response in
+      let request = self.ch.makeSubscription(path, body, options) { response in
         if let error = response.error {
           continuation.resume(throwing: ChannelError(text: error))
         } else {
@@ -584,17 +592,17 @@ public struct Values<State: Sendable, Body: Encodable & Sendable, Context: Encod
   private let ch: Channel<State>
   private let path: String
   private let body: Body?
-  private let context: Context?
+  private let options: SendOptions<Context>?
   private let connection: ConnectionInterface
-  init(ch: Channel<State>, path: String, body: Body?, context: Context?, connection: ConnectionInterface) {
+  init(ch: Channel<State>, path: String, body: Body?, options: SendOptions<Context>?, connection: ConnectionInterface) {
     self.ch = ch
     self.path = path
     self.body = body
-    self.context = context
+    self.options = options
     self.connection = connection
   }
   public func makeAsyncIterator() -> ValuesIterator<State, Body, Context, Output> {
-    ValuesIterator(ch: ch, path: path, body: body, context: context, connection: connection)
+    ValuesIterator(ch: ch, path: path, body: body, options: options, connection: connection)
   }
 }
 
@@ -605,7 +613,7 @@ public class ValuesIterator<State: Sendable, Body: Encodable & Sendable, Context
   private let ch: Channel<State>
   private let path: String
   private let body: Body?
-  private let context: Context?
+  private let options: SendOptions<Context>?
   private let connection: ConnectionInterface
   private var isRunning = false
   private var pending: [(@MainActor (Result<Element?, Error>) -> Void)] = []
@@ -614,11 +622,11 @@ public class ValuesIterator<State: Sendable, Body: Encodable & Sendable, Context
   private var isCompleted: Bool = false
   private var connectionRequestId: Int?
   
-  init(ch: Channel<State>, path: String, body: Body?, context: Context?, connection: ConnectionInterface) {
+  init(ch: Channel<State>, path: String, body: Body?, options: SendOptions<Context>?, connection: ConnectionInterface) {
     self.ch = ch
     self.path = path
     self.body = body
-    self.context = context
+    self.options = options
     self.connection = connection
   }
   
@@ -642,7 +650,7 @@ public class ValuesIterator<State: Sendable, Body: Encodable & Sendable, Context
   private func start() {
     if self.isRunning { return }
     self.isRunning = true
-    let request = self.ch.makeStream(path, body, context) { response in
+    let request = self.ch.makeStream(path, body, options) { response in
       let result = Result<Element?, Error> { try response.parseStream() }
       if !self.pending.isEmpty {
         let pendingClosure = self.pending.removeFirst()
