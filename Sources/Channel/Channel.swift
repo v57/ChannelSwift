@@ -681,22 +681,15 @@ public class ValuesIterator<State: Sendable, Body: Encodable & Sendable, Context
     if !queued.isEmpty {
       return try queued.removeFirst().get()
     } else {
-      var cancel: (@MainActor @Sendable () -> ())?
-      var isCancelled = false
-      var isSent = false
       return try await withTaskCancellationHandler {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Element?, Error>) in
-          cancel = {
-            if !isSent {
-              continuation.resume(throwing: CancellationError())
-            }
-          }
           if self.queued.count > 0 {
             continuation.resume(with: self.queued.removeFirst())
           } else {
             self.pending.append { response in
-              guard !isCancelled else { return }
-              isSent = true
+              guard !Task.isCancelled else {
+                continuation.resume(throwing: CancellationError())
+                return }
               continuation.resume(with: response)
             }
             self.start()
@@ -705,9 +698,7 @@ public class ValuesIterator<State: Sendable, Body: Encodable & Sendable, Context
       } onCancel: {
         Task { @MainActor in
           if let rid {
-            isCancelled = true
             onCancel(id: rid)
-            cancel?()
           }
         }
       }
