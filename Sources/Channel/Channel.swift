@@ -201,7 +201,7 @@ public class Channel<State: Sendable>: @unchecked Sendable {
   public var otherStreamApi: [(path: (String) -> Bool, request: Stream<State>)] = []
   public var _onDisconnect: ((State, any Sender) -> Void)?
   public var eventsApi: [String: SubscriptionProtocol]?
-  private var streams: [Int: Task<Void, Error>] = [:]
+  private var tasks: [Int: Task<Void, Never>] = [:]
   
   public init() { }
   
@@ -329,17 +329,23 @@ public class Channel<State: Sendable>: @unchecked Sendable {
       do {
         guard let api else { throw ChannelError(text: "api not found") }
         let body = AnonymousBody(body: AnyBody(container: some.container), sender: controller.sender, state: controller.state)
-        Task {
+        let task = Task {
           do {
             let result = try await api(body, path)
             if let id {
               controller.respond(Response(id: id, body: result))
             }
-          } catch {
+          } catch is CancellationError { } catch {
             if let id {
               controller.respond(Response(id: id, error: ChannelError(error: error)))
             }
           }
+          if let id {
+            tasks[id] = nil
+          }
+        }
+        if let id {
+          tasks[id] = task
         }
       } catch {
         if let id {
@@ -364,9 +370,9 @@ public class Channel<State: Sendable>: @unchecked Sendable {
         }
       }
     } else if let id = some.cancel {
-      if let stream = streams[id] {
-        stream.cancel()
-        streams[id] = nil
+      if let task = tasks[id] {
+        task.cancel()
+        tasks[id] = nil
       }
     } else if let sub = some.sub {
       let id = some.id
@@ -412,7 +418,7 @@ public class Channel<State: Sendable>: @unchecked Sendable {
   }
   
   private func streamRequest<C: Controller>(_ id: Int, controller: C, path: String, body: AnyBody, stream: @escaping Stream<State>) where C.State == State {
-    streams[id] = Task {
+    tasks[id] = Task {
       do {
         let bodyParam = AnonymousBody(body: body, sender: controller.sender, state: controller.state)
         let values = stream(bodyParam, path)
@@ -423,7 +429,7 @@ public class Channel<State: Sendable>: @unchecked Sendable {
       } catch {
         controller.respond(Response(id: id, error: ChannelError(error: error)))
       }
-      streams[id] = nil
+      tasks[id] = nil
     }
   }
   
