@@ -6,7 +6,9 @@
 //
 
 import Foundation
-import Combine
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 public extension Channel {
   func connect(_ port: Int, state: State, options: ClientOptions<State> = ClientOptions()) -> ClientSender<State> {
@@ -131,7 +133,13 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
   private var isWaiting = 0
   private var isWaitingLength = 0
   private var messageQueue = [AnyEncodable]()
-  @Published public private(set) var isConnected = false
+  public private(set) var isConnected = false {
+    didSet {
+      guard isConnected != oldValue else { return }
+      isConnectedChanged?(isConnected)
+    }
+  }
+  public var isConnectedChanged: ((Bool) -> ())?
   private var headers: (() -> [String: String])?
   private var reconnectTimer: Timer?
   private let decoderQueue = DispatchQueue(label: "decoder")
