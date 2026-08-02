@@ -354,20 +354,8 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
   }
 }
 
-
-public extension JSONDecoder {
-  struct InvalidDateFormat: Error { }
-  static let iso8601: JSONDecoder = {
-    let decoder = JSONDecoder()
-    decoder.dateDecodingStrategy = .custom {
-      let string = try $0.singleValueContainer().decode(String.self)
-      guard let date = JSONDecoder.formatter.date(from: string)
-        else { throw InvalidDateFormat() }
-      return date
-    }
-    return decoder
-  }()
-  nonisolated(unsafe) fileprivate static let formatter: ISO8601DateFormatter = {
+extension ISO8601DateFormatter {
+  nonisolated(unsafe) public static let js: ISO8601DateFormatter = {
     let formatter = ISO8601DateFormatter()
     formatter.timeZone = TimeZone(secondsFromGMT: 0)
     formatter.formatOptions = [
@@ -377,11 +365,25 @@ public extension JSONDecoder {
     return formatter
   }()
 }
-extension JSONEncoder {
+
+public extension JSONDecoder {
+  struct InvalidDateFormat: Error { }
+  static let iso8601: JSONDecoder = {
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .custom {
+      let string = try $0.singleValueContainer().decode(String.self)
+      guard let date = ISO8601DateFormatter.js.date(from: string)
+        else { throw InvalidDateFormat() }
+      return date
+    }
+    return decoder
+  }()
+}
+public extension JSONEncoder {
   static let iso8601: JSONEncoder = {
     let encoder = JSONEncoder()
     encoder.dateEncodingStrategy = .custom { date, encoder in
-      try JSONDecoder.formatter.string(from: date).encode(to: encoder)
+      try ISO8601DateFormatter.js.string(from: date).encode(to: encoder)
     }
     return encoder
   }()
