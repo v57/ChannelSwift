@@ -361,8 +361,9 @@ public class Channel<State: Sendable>: @unchecked Sendable {
         }
       }
       do {
-        guard let api else { throw ChannelError(text: "api not found") }
+        // Checking id first works around a Swift 6.4 optimizer crash (CopyPropagation) in Release builds.
         guard let id else { throw ChannelError(text: "stream requires id") }
+        guard let api else { throw ChannelError(text: "api not found") }
         self.streamRequest(id, controller: controller, path: path, body: some.anyBody, stream: api)
       } catch {
         if let id {
