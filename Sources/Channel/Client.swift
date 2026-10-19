@@ -29,19 +29,23 @@ public extension Channel {
     let topics = UnsafeMutable(Set<String>())
     let sender = ChannelSender(ch: ch, connection: ws)
     
-    // Setup connection callbacks
+    // Setup connection callbacks. They hold the client weakly, so a stopped client that the app releases goes away.
     if let onConnect = options.onConnect {
-      ws.onOpen = {
+      ws.onOpen = { [weak ws] in
+        guard let ws else { return }
+        let sender = ChannelSender(ch: ch, connection: ws)
         Task {
           try? await onConnect(sender)
         }
       }
     }
     
-    ws.onMessage = { message in
+    ws.onMessage = { [weak ws] message in
+      guard let ws else { return }
+      let sender = ChannelSender(ch: ch, connection: ws)
       ch.receive(message, controller: ChannelController(
-        respond: { body in
-          ws.notify(body)
+        respond: { [weak ws] body in
+          ws?.notify(body)
         },
         subscribe: { topic in
           topics.value.insert(topic)
@@ -49,8 +53,8 @@ public extension Channel {
         unsubscribe: { topic in
           topics.value.remove(topic)
         },
-        event: { topic, body in
-          ws.receivedEvent(topic: topic, body: body)
+        event: { [weak ws] topic, body in
+          ws?.receivedEvent(topic: topic, body: body)
         },
         sender: sender,
         state: state
@@ -159,7 +163,8 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
   private let url: URL
   private var webSocket: URLSessionWebSocketTask?
   var currentTask: URLSessionWebSocketTask? { webSocket }
-  private var session: URLSession!
+  /// Created on the first connection attempt and invalidated by `stop()`, since a session keeps its delegate alive
+  private var session: URLSession?
   
   public var onOpen: (() -> Void)?
   public var onMessage: (([ReceivedResponse]) -> Void)?
@@ -218,7 +223,6 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
     self.maximumMessageSize = maximumMessageSize
     self.reconnectOnNetworkChange = reconnectOnNetworkChange
     super.init()
-    self.session = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
     start()
   }
   
@@ -248,6 +252,8 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
     for (key, value) in headers {
       request.setValue(value, forHTTPHeaderField: key)
     }
+    let session = self.session ?? URLSession(configuration: .default, delegate: self, delegateQueue: nil)
+    self.session = session
     let webSocket = session.webSocketTask(with: request)
     webSocket.maximumMessageSize = maximumMessageSize
     self.webSocket = webSocket
@@ -361,6 +367,8 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
     let task = webSocket
     webSocket = nil
     task?.cancel(with: .goingAway, reason: nil)
+    session?.finishTasksAndInvalidate()
+    session = nil
     messageQueue.removeAll()
     isWaiting = 0
     connectionState = .disconnected
