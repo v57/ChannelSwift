@@ -1081,7 +1081,8 @@ public struct AnyBody: @unchecked Sendable {
   public func decode<T: Decodable>(_ type: T.Type = T.self) throws -> T {
     try body()
   }
-  func body<Body: Decodable>() throws -> Body {
+  /// Same as `decode(_:)`, with the type inferred from the context
+  public func body<Body: Decodable>() throws -> Body {
     if let optional = Body.self as? any OptionalDecodable.Type {
       try optional.decode(container, key: key) as! Body
     } else {
