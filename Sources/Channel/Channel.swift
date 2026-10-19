@@ -111,7 +111,7 @@ public struct Response: Encodable, Sendable {
     self.done = done
   }
   enum CodingKeys: CodingKey {
-    case id, topic, body, error, done
+    case id, topic, body, error, code, done
   }
   public func encode(to encoder: any Encoder) throws {
     var container: KeyedEncodingContainer<CodingKeys> = encoder.container(keyedBy: CodingKeys.self)
@@ -121,6 +121,7 @@ public struct Response: Encodable, Sendable {
       try container.encode(body, forKey: CodingKeys.body)
     }
     try container.encodeIfPresent(self.error, forKey: CodingKeys.error)
+    try container.encodeIfPresent(self.error?.code, forKey: CodingKeys.code)
     try container.encodeIfPresent(self.done, forKey: CodingKeys.done)
   }
 }
@@ -136,30 +137,94 @@ public struct ReceivedResponse: Decodable, @unchecked Sendable {
   var error: String?
   let container: KeyedDecodingContainer<CodingKeys> /* @unchecked Sendable */
   var anyBody: AnyBody { AnyBody(container: container) }
-  
-  enum CodingKeys: CodingKey {
-    case id, path, body, context, stream, cancel, sub, unsub, topic, done, error
+  /// The message has a `body` key, `null` included
+  var hasBody: Bool { container.contains(.body) }
+  var channelError: ChannelError? {
+    guard let error else { return nil }
+    let code = try? container.decodeIfPresent(ChannelError.Code.self, forKey: .code)
+    let info = container.contains(.info) ? AnyBody(container: container, key: .info) : nil
+    return ChannelError(text: error, code: code, info: info)
   }
   
+  enum CodingKeys: CodingKey {
+    case id, path, body, context, stream, cancel, sub, unsub, topic, done, error, code, info, message
+  }
+  
+  // A field with an unexpected type reads as missing, so one odd field doesn't drop the whole frame
   public init(from decoder: any Decoder) throws {
     container = try decoder.container(keyedBy: CodingKeys.self)
-    self.id = try container.decodeIfPresent(Int.self, forKey: .id)
-    self.path = try container.decodeIfPresent(String.self, forKey: .path)
-    self.stream = try container.decodeIfPresent(String.self, forKey: .stream)
-    self.cancel = try container.decodeIfPresent(Int.self, forKey: .cancel)
-    self.sub = try container.decodeIfPresent(String.self, forKey: .sub)
-    self.unsub = try container.decodeIfPresent(String.self, forKey: .unsub)
-    self.topic = try container.decodeIfPresent(String.self, forKey: .topic)
-    self.done = try container.decodeIfPresent(Bool.self, forKey: .done)
-    self.error = try container.decodeIfPresent(String.self, forKey: .error)
+    self.id = try? container.decodeIfPresent(Int.self, forKey: .id)
+    self.path = try? container.decodeIfPresent(String.self, forKey: .path)
+    self.stream = try? container.decodeIfPresent(String.self, forKey: .stream)
+    self.cancel = try? container.decodeIfPresent(Int.self, forKey: .cancel)
+    self.sub = try? container.decodeIfPresent(String.self, forKey: .sub)
+    self.unsub = try? container.decodeIfPresent(String.self, forKey: .unsub)
+    self.topic = try? container.decodeIfPresent(String.self, forKey: .topic)
+    self.done = try? container.decodeIfPresent(Bool.self, forKey: .done)
+    if container.contains(.error), (try? container.decodeNil(forKey: .error)) == false {
+      if let text = try? container.decode(String.self, forKey: .error) {
+        self.error = text.isEmpty ? "error" : text
+      } else if let text = try? container.nestedContainer(keyedBy: CodingKeys.self, forKey: .error).decode(String.self, forKey: .message) {
+        self.error = text
+      } else {
+        self.error = "error"
+      }
+    }
   }
 }
 public struct ChannelError: Error, CustomStringConvertible, Codable, Sendable {
+  /// Error code: an application code (often HTTP-like numbers) or a library code like `timeout`
+  public enum Code: Codable, Hashable, Sendable, CustomStringConvertible, ExpressibleByIntegerLiteral, ExpressibleByStringLiteral {
+    case int(Int), string(String)
+    /// No handler for the path or subscription
+    public static let notFound: Code = "not_found"
+    /// The server-side task was cancelled
+    public static let cancelled: Code = "cancelled"
+    /// Refused by a rate limiter, `info: { retryAfter: seconds }`
+    public static let rateLimited: Code = "rate_limited"
+    /// Client only: no response in time
+    public static let timeout: Code = "timeout"
+    /// Client only: the connection dropped and the request can't be replayed, or `stop()` was called
+    public static let disconnected: Code = "disconnected"
+    /// Client only: the response didn't decode into the expected type
+    public static let decoding: Code = "decoding"
+    public init(integerLiteral value: Int) { self = .int(value) }
+    public init(stringLiteral value: String) { self = .string(value) }
+    public init(from decoder: any Decoder) throws {
+      let container = try decoder.singleValueContainer()
+      if let value = try? container.decode(Int.self) {
+        self = .int(value)
+      } else {
+        self = try .string(container.decode(String.self))
+      }
+    }
+    public func encode(to encoder: any Encoder) throws {
+      var container = encoder.singleValueContainer()
+      switch self {
+      case .int(let value): try container.encode(value)
+      case .string(let value): try container.encode(value)
+      }
+    }
+    public var description: String {
+      switch self {
+      case .int(let value): "\(value)"
+      case .string(let value): value
+      }
+    }
+  }
   public let text: String
+  public var code: Code?
+  /// Any JSON the server attached to the error. Decode it with `info?.decode(T.self)`.
+  public var info: AnyBody?
   public var localizedDescription: String { text }
   public var description: String { text }
   public init(text: String) {
     self.text = text
+  }
+  public init(text: String, code: Code?, info: AnyBody? = nil) {
+    self.text = text
+    self.code = code
+    self.info = info
   }
   public init?(optional: String?) {
     guard let optional else { return nil }
@@ -167,10 +232,14 @@ public struct ChannelError: Error, CustomStringConvertible, Codable, Sendable {
   }
   public init(error: Error) {
     if let error = error as? ChannelError {
-      text = error.text
+      self = error
     } else {
       text = "internal error"
     }
+  }
+  static func decoding(_ error: Error) -> ChannelError {
+    if let error = error as? ChannelError { return error }
+    return ChannelError(text: "decoding: \(error)", code: .decoding)
   }
   public init(from decoder: any Decoder) throws {
     text = try decoder.singleValueContainer().decode(String.self)
@@ -327,7 +396,7 @@ public class Channel<State: Sendable>: @unchecked Sendable {
       let id = some.id
       let api: Function<State>? = self.postApi[path] ?? otherPostApi.first(where: { $0.path(path) })?.request
       do {
-        guard let api else { throw ChannelError(text: "api not found") }
+        guard let api else { throw ChannelError(text: "api not found", code: .notFound) }
         let body = AnonymousBody(body: AnyBody(container: some.container), sender: controller.sender, state: controller.state)
         let task = Task {
           do {
@@ -363,7 +432,7 @@ public class Channel<State: Sendable>: @unchecked Sendable {
       do {
         // Checking id first works around a Swift 6.4 optimizer crash (CopyPropagation) in Release builds.
         guard let id else { throw ChannelError(text: "stream requires id") }
-        guard let api else { throw ChannelError(text: "api not found") }
+        guard let api else { throw ChannelError(text: "api not found", code: .notFound) }
         self.streamRequest(id, controller: controller, path: path, body: some.anyBody, stream: api)
       } catch {
         if let id {
@@ -379,7 +448,7 @@ public class Channel<State: Sendable>: @unchecked Sendable {
       let id = some.id
       guard let subscription = self.eventsApi?[sub] else {
         if let id {
-          controller.respond(Response(id: id, error: ChannelError(text: "subscription not found")))
+          controller.respond(Response(id: id, error: ChannelError(text: "subscription not found", code: .notFound)))
         }
         return
       }
@@ -544,13 +613,13 @@ public struct ChannelSender<State: Sendable>: Sender, @unchecked Sendable {
     return try await withCheckedThrowingContinuation { continuation in
       let id = UnsafeMutable<Int?>(nil)
       let request = self.ch.makeRequest(path, body, options) { response in
-        if let error = response.error {
-          continuation.resume(throwing: ChannelError(text: error))
+        if let error = response.channelError {
+          continuation.resume(throwing: error)
         } else {
           do {
             try continuation.resume(returning: response.anyBody.body())
           } catch {
-            continuation.resume(throwing: error)
+            continuation.resume(throwing: ChannelError.decoding(error))
           }
         }
         if let id = id.value {
@@ -568,8 +637,8 @@ public struct ChannelSender<State: Sendable>: Sender, @unchecked Sendable {
   public func subscribe<Body: Encodable & Sendable, Context: Encodable & Sendable>(_ path: String, _ body: Body?, options: SendOptions<Context>?, event: @escaping @Sendable @MainActor (AnyBody) -> Void) async throws -> _Cancellable {
     return try await withCheckedThrowingContinuation { continuation in
       let request = self.ch.makeSubscription(path, body, options) { response in
-        if let error = response.error {
-          continuation.resume(throwing: ChannelError(text: error))
+        if let error = response.channelError {
+          continuation.resume(throwing: error)
         } else {
           let topic = response.topic ?? ""
           let cancelClosure = self.connection.addTopic(topic: topic, event: event)
@@ -724,12 +793,16 @@ public class ValuesIterator<State: Sendable, Body: Encodable & Sendable, Context
 }
 private extension ReceivedResponse {
   func parseStream<T: Decodable>() throws -> T? {
-    if done == true {
+    if let error = channelError {
+      throw error
+    } else if done == true {
       return try? anyBody.body()
-    } else if let error {
-      throw ChannelError(text: error)
     } else {
-      return try anyBody.body()
+      do {
+        return try anyBody.body()
+      } catch {
+        throw ChannelError.decoding(error)
+      }
     }
   }
 }
@@ -822,14 +895,20 @@ private struct CancellationRequest: Encodable {
 }
 public struct AnyBody: @unchecked Sendable {
   private let container: KeyedDecodingContainer<ReceivedResponse.CodingKeys>
-  init(container: KeyedDecodingContainer<ReceivedResponse.CodingKeys>) {
+  private let key: ReceivedResponse.CodingKeys
+  init(container: KeyedDecodingContainer<ReceivedResponse.CodingKeys>, key: ReceivedResponse.CodingKeys = .body) {
     self.container = container
+    self.key = key
+  }
+  /// Decodes the value. Use an optional type to accept `null` or a missing value.
+  public func decode<T: Decodable>(_ type: T.Type = T.self) throws -> T {
+    try body()
   }
   func body<Body: Decodable>() throws -> Body {
     if let optional = Body.self as? any OptionalDecodable.Type {
-      try optional.decode(container, key: .body) as! Body
+      try optional.decode(container, key: key) as! Body
     } else {
-      try container.decode(Body.self, forKey: .body)
+      try container.decode(Body.self, forKey: key)
     }
   }
   func context<Body: Decodable>() throws -> Body {
