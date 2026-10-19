@@ -704,7 +704,7 @@ public struct ChannelSender<State: Sendable>: Sender, @unchecked Sendable {
           }
           // Only the first response returns a cancellable: releasing one cancels the subscription
           if sub.isWaiting {
-            sub.resume(returning: _AnyCancellable {
+            sub.resume(returning: _AnyCancellable(subscription: sub) {
               onMainActor { sub.cancel(ch: ch, connection: connection) }
             })
           }
@@ -714,7 +714,7 @@ public struct ChannelSender<State: Sendable>: Sender, @unchecked Sendable {
             event(response.anyBody)
           }
           if sub.isWaiting {
-            sub.resume(returning: _AnyCancellable { })
+            sub.resume(returning: _AnyCancellable(subscription: sub) { })
           }
         }
       }
@@ -935,7 +935,7 @@ final class SubscriptionCall: Sendable {
   var topic: String?
   var removeTopic: (@Sendable @MainActor () -> Bool)?
   var timer: Task<Void, Never>?
-  private var isEnded = false
+  private(set) var isEnded = false
   var isWaiting: Bool { continuation != nil }
   init(continuation: CheckedContinuation<_Cancellable, Error>) {
     self.continuation = continuation
@@ -994,9 +994,24 @@ final class UnsafeMutable<Value: Sendable>: @unchecked Sendable {
 public protocol _Cancellable: Sendable {
   func cancel()
 }
+@MainActor
+public extension _Cancellable {
+  /// For a value returned by `subscribe`: the topic the server returned, `nil` for a one-shot subscription
+  var topic: String? {
+    (self as? _AnyCancellable)?.subscription?.topic
+  }
+  /// For a value returned by `subscribe`: whether it still gets events and subscribes again after a reconnect.
+  /// `false` for a one-shot, after `cancel()`, and once the server refused a resubscribe.
+  var isSubscribed: Bool {
+    guard let subscription = (self as? _AnyCancellable)?.subscription else { return false }
+    return !subscription.isEnded
+  }
+}
 final class _AnyCancellable: _Cancellable {
   private let canceller: @Sendable () -> Void
-  init(canceller: @Sendable @escaping () -> Void) {
+  let subscription: SubscriptionCall?
+  init(subscription: SubscriptionCall? = nil, canceller: @Sendable @escaping () -> Void) {
+    self.subscription = subscription
     self.canceller = canceller
   }
   func cancel() {

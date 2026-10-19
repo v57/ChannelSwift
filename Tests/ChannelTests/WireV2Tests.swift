@@ -251,6 +251,37 @@ struct WireV2Tests {
     client.stop()
   }
 
+  @Test("a stopped client doesn't reconnect and is released")
+  func stopReleases() async throws {
+    weak var released: WebSocketClient?
+    do {
+      let client = await Fixture.client()
+      released = client.ws
+      var seen = [ConnectionState]()
+      let observer = client.onStateChange { seen.append($0) }
+      client.stop()
+      await sleep(seconds: 0.3)
+      #expect(seen == [.disconnected])
+      #expect(client.connectionState == .disconnected)
+      observer.cancel()
+    }
+    #expect(await waitUntil { released == nil })
+  }
+  
+  @Test("one-shot and live subscription tokens")
+  func tokens() async throws {
+    let client = await Fixture.client()
+    defer { client.stop() }
+    let once = try await client.subscribe("v2/once") { _ in }
+    #expect(once.topic == nil)
+    #expect(!once.isSubscribed)
+    let room = try await client.subscribe("v2/room", Room(room: "tokens")) { _ in }
+    #expect(room.topic == "room/tokens")
+    #expect(room.isSubscribed)
+    room.cancel()
+    #expect(!room.isSubscribed)
+  }
+  
   @Test("a reply that doesn't decode fails only that call")
   func decoding() async throws {
     let client = await Fixture.client()

@@ -41,7 +41,7 @@ their original order once the connection opens, and active subscriptions subscri
 
 ```swift
 client.reconnectNow()          // skip the backoff, e.g. when the app comes to the foreground
-client.stop()                  // stop reconnecting, fail every pending call with `disconnected`
+client.stop()                  // stop reconnecting, fail every pending call with `disconnected`, release the URLSession
 client.ws.start()              // connect again after stop()
 
 client.connectionState         // .disconnected, .connecting or .connected
@@ -93,9 +93,11 @@ decode into the expected type; only that call fails).
 
 ```swift
 let subscription = try await client.subscribe("chat/list", Room(id: 42)) { body in
-  let event = try? body.decode(ChatEvent.self)
+  let event = try? body.decode(ChatEvent.self) // or: let event: ChatEvent = try body.body()
 }
-subscription.cancel() // or release it
+subscription.topic        // the topic the server returned, nil for a one-shot
+subscription.isSubscribed // false for a one-shot, after cancel(), or once a resubscribe was refused
+subscription.cancel()     // or release it
 ```
 
 - The response body is the first event (a snapshot). After a reconnect the client subscribes again and the new

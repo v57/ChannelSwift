@@ -180,6 +180,8 @@ struct UnitTests {
     h.receive(#"{"id":0,"topic":"room/a","body":"snapshot"}"#)
     let token = try await sub.value
     #expect(events.values == [.string("snapshot")])
+    #expect(token.topic == "room/a")
+    #expect(token.isSubscribed)
     h.receive(#"[{"topic":"room/a","body":0},{"topic":"room/a","body":false},{"topic":"room/a","body":""},{"topic":"room/a","body":null},{"topic":"room/a"}]"#)
     #expect(events.values == [.string("snapshot"), .int(0), .bool(false), .string(""), .null])
     // Still in the replay set while active; a resubscribe delivers a fresh snapshot
@@ -188,6 +190,7 @@ struct UnitTests {
     #expect(events.values.last == .string("again"))
 
     token.cancel()
+    #expect(!token.isSubscribed)
     #expect(h.connection.pending.isEmpty)
     #expect(h.channel.requests.isEmpty)
     #expect(h.connection.notified == [#"{"unsub":"room\/a"}"#])
@@ -218,6 +221,8 @@ struct UnitTests {
     h.receive(#"{"id":0,"body":"once"}"#)
     let token = try await sub.value
     #expect(events.values == [.string("once")])
+    #expect(token.topic == nil)
+    #expect(!token.isSubscribed)
     #expect(h.connection.pending.isEmpty)
     #expect(h.connection.topicCount == 0)
     h.receive(#"{"id":0,"body":"once"}"#)
@@ -238,6 +243,7 @@ struct UnitTests {
     #expect(h.connection.pending.isEmpty)
     #expect(h.channel.requests.isEmpty)
     #expect(h.connection.topicCount == 0)
+    #expect(!token.isSubscribed)
     #expect(h.connection.notified == [#"{"unsub":"private\/a"}"#])
     h.receive(#"{"topic":"private/a","body":"b"}"#)
     #expect(events.values == [.string("a")])
@@ -271,6 +277,7 @@ struct UnitTests {
     h.receive(#"{"id":0,"topic":"user/2","body":2}"#)
     h.receive(#"[{"topic":"user/1","body":3},{"topic":"user/2","body":4}]"#)
     #expect(events.values == [.int(1), .int(2), .int(4)])
+    #expect(token.topic == "user/2")
     #expect(h.connection.topicCount == 1)
     token.cancel()
   }
