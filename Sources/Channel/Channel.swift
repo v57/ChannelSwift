@@ -691,7 +691,7 @@ public struct ChannelSender<State: Sendable>: Sender, @unchecked Sendable {
         sub.timer = nil
         if let error = response.channelError {
           // Refused, on the first try or on a resubscribe after a reconnect: the subscription ends
-          sub.end(ch: ch, connection: connection)
+          sub.cancel(ch: ch, connection: connection)
           sub.resume(throwing: error)
         } else if let topic = response.topic {
           if sub.topic != topic {
@@ -720,12 +720,12 @@ public struct ChannelSender<State: Sendable>: Sender, @unchecked Sendable {
       }
       let rid = request.id
       sub.rid = rid
+      // With `replay: false`, a dropped connection ends an active subscription silently
       let fail: @Sendable @MainActor (ChannelError) -> Void = { error in
-        sub.end(ch: ch, connection: connection)
+        sub.cancel(ch: ch, connection: connection)
         sub.resume(throwing: error)
       }
-      // Active subscriptions are always sent again after a reconnect
-      sub.id = connection.send(request, options: RequestOptions(replay: true, fail: fail))
+      sub.id = connection.send(request, options: RequestOptions(replay: options?.replay ?? true, fail: fail))
       if let timeout = options?.timeout ?? connection.requestTimeout, timeout > 0 {
         sub.timer = Task { @MainActor in
           try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
@@ -963,12 +963,12 @@ final class SubscriptionCall: Sendable {
       connection.sent(id)
     }
   }
+  /// Ends the subscription and drops its listener, sending `unsub` when it was the topic's last one
   func cancel<State>(ch: Channel<State>, connection: ConnectionInterface) {
-    let wasActive = !isEnded
     end(ch: ch, connection: connection)
     if let removeTopic, let topic {
       self.removeTopic = nil
-      if removeTopic() && wasActive {
+      if removeTopic() {
         connection.notify(["unsub": topic])
       }
     }

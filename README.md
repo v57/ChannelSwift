@@ -103,6 +103,7 @@ subscription.cancel() // or release it
 - A response without a topic is one-shot: its body is delivered once and the subscription ends.
 - Events are delivered whenever the message has a `body`, including `0`, `false`, `""` and `null`.
 - Cancelled subscriptions are not sent again after a reconnect. A resubscribe the server refuses ends the subscription.
+- With `SendOptions(replay: false)`, a dropped connection ends the subscription instead of subscribing again.
 
 ## Tests
 

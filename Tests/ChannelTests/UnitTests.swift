@@ -237,6 +237,26 @@ struct UnitTests {
     h.receive(#"{"id":0,"error":"unauthorized","code":401}"#)
     #expect(h.connection.pending.isEmpty)
     #expect(h.channel.requests.isEmpty)
+    #expect(h.connection.topicCount == 0)
+    #expect(h.connection.notified == [#"{"unsub":"private\/a"}"#])
+    h.receive(#"{"topic":"private/a","body":"b"}"#)
+    #expect(events.values == [.string("a")])
+    token.cancel()
+    #expect(h.connection.notified.count == 1)
+  }
+  
+  @Test("replay: false ends an active subscription when the connection drops")
+  func subscriptionNoReplay() async throws {
+    let h = Harness()
+    let events = Events()
+    let sub = Task { try await h.sender.subscribe("room", options: SendOptions(replay: false), event: events.handler) }
+    await h.requests(1)
+    #expect(h.connection.pending[0]?.replay == false)
+    h.receive(#"{"id":0,"topic":"room","body":1}"#)
+    let token = try await sub.value
+    h.connection.drop()
+    #expect(h.channel.requests.isEmpty)
+    #expect(h.connection.topicCount == 0)
     token.cancel()
   }
 
