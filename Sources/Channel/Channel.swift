@@ -21,6 +21,8 @@ public protocol Controller: Sendable {
 }
 @MainActor
 protocol StreamRequestProtocol: Sendable { }
+@MainActor
+protocol SubscriptionRequestProtocol: Sendable { }
 
 @MainActor
 public protocol ConnectionInterface: Sendable {
@@ -68,7 +70,7 @@ public struct Body<Body: Decodable & Sendable, Context: Decodable & Sendable, St
   public var state: State
 }
 
-public struct SubscriptionRequest<Body: Encodable & Sendable, Context: Encodable & Sendable>: Encodable, Sendable {
+public struct SubscriptionRequest<Body: Encodable & Sendable, Context: Encodable & Sendable>: Encodable, SubscriptionRequestProtocol {
   public var id: Int
   public var sub: String
   public var body: Body?
@@ -472,18 +474,17 @@ public class Channel<State: Sendable>: @unchecked Sendable {
       }
     } else if let unsub = some.unsub {
       controller.unsubscribe(unsub)
-    } else if let topic = some.topic {
-      if let id = some.id, let request = self.requests[id] {
-        self.requests[id] = nil
-        request.onResponse(some)
-      }
-      controller.event(topic, some.anyBody)
     } else if let id = some.id {
       guard let request = self.requests[id] else { return }
-      if !((request.request is StreamRequestProtocol) && (some.done != true) ) {
+      // Subscriptions stay while active, so a resubscribe after a reconnect finds its handler
+      if !(request.request is SubscriptionRequestProtocol) && !((request.request is StreamRequestProtocol) && (some.done != true) && some.error == nil) {
         self.requests[id] = nil
       }
       request.onResponse(some)
+    } else if let topic = some.topic {
+      // Only a missing body means no event: 0, false, "" and null are delivered
+      guard some.hasBody else { return }
+      controller.event(topic, some.anyBody)
     }
   }
   
@@ -634,26 +635,46 @@ public struct ChannelSender<State: Sendable>: Sender, @unchecked Sendable {
     Values(ch: ch, path: path, body: body, options: options, connection: connection)
   }
   
+  /// Subscribes to `path`. The response body is delivered to `event` first, as a snapshot, then every published event.
+  /// A response without a topic is one-shot: its body is delivered once and the subscription ends.
+  /// Active subscriptions are sent again after a reconnect and deliver a fresh snapshot.
   public func subscribe<Body: Encodable & Sendable, Context: Encodable & Sendable>(_ path: String, _ body: Body?, options: SendOptions<Context>?, event: @escaping @Sendable @MainActor (AnyBody) -> Void) async throws -> _Cancellable {
+    let ch = self.ch
+    let connection = self.connection
     return try await withCheckedThrowingContinuation { continuation in
-      let request = self.ch.makeSubscription(path, body, options) { response in
+      let sub = SubscriptionCall(continuation: continuation)
+      let request = ch.makeSubscription(path, body, options) { response in
         if let error = response.channelError {
-          continuation.resume(throwing: error)
-        } else {
-          let topic = response.topic ?? ""
-          let cancelClosure = self.connection.addTopic(topic: topic, event: event)
-          let cancellable = _AnyCancellable {
-            Task { @MainActor in
-              let cancelled = cancelClosure()
-              if cancelled {
-                self.connection.notify(["unsub": topic])
-              }
-            }
+          // Refused, on the first try or on a resubscribe after a reconnect: the subscription ends
+          sub.end(ch: ch, connection: connection)
+          sub.resume(throwing: error)
+        } else if let topic = response.topic {
+          if sub.topic != topic {
+            _ = sub.removeTopic?()
+            sub.topic = topic
+            sub.removeTopic = connection.addTopic(topic: topic, event: event)
           }
-          continuation.resume(returning: cancellable)
+          if response.hasBody {
+            event(response.anyBody)
+          }
+          // Only the first response returns a cancellable: releasing one cancels the subscription
+          if sub.isWaiting {
+            sub.resume(returning: _AnyCancellable {
+              onMainActor { sub.cancel(ch: ch, connection: connection) }
+            })
+          }
+        } else {
+          sub.end(ch: ch, connection: connection)
+          if response.hasBody {
+            event(response.anyBody)
+          }
+          if sub.isWaiting {
+            sub.resume(returning: _AnyCancellable { })
+          }
         }
       }
-      _ = self.connection.send(request)
+      sub.rid = request.id
+      sub.id = connection.send(request)
     }
   }
   
@@ -807,6 +828,61 @@ private extension ReceivedResponse {
   }
 }
 
+/// State of one subscription, shared by its response handler and its cancellable
+@MainActor
+final class SubscriptionCall: Sendable {
+  private var continuation: CheckedContinuation<_Cancellable, Error>?
+  var id: Int?
+  var rid: Int?
+  var topic: String?
+  var removeTopic: (@Sendable @MainActor () -> Bool)?
+  private var isEnded = false
+  var isWaiting: Bool { continuation != nil }
+  init(continuation: CheckedContinuation<_Cancellable, Error>) {
+    self.continuation = continuation
+  }
+  func resume(returning value: _Cancellable) {
+    guard let continuation else { return }
+    self.continuation = nil
+    continuation.resume(returning: value)
+  }
+  func resume(throwing error: Error) {
+    guard let continuation else { return }
+    self.continuation = nil
+    continuation.resume(throwing: error)
+  }
+  /// Removes the subscription from the response handlers and from the replay set
+  func end<State>(ch: Channel<State>, connection: ConnectionInterface) {
+    guard !isEnded else { return }
+    isEnded = true
+    if let rid {
+      ch.requests[rid] = nil
+    }
+    if let id {
+      connection.sent(id)
+    }
+  }
+  func cancel<State>(ch: Channel<State>, connection: ConnectionInterface) {
+    let wasActive = !isEnded
+    end(ch: ch, connection: connection)
+    if let removeTopic, let topic {
+      self.removeTopic = nil
+      if removeTopic() && wasActive {
+        connection.notify(["unsub": topic])
+      }
+    }
+  }
+}
+
+/// Runs `body` right away on the main thread, otherwise on the main actor later
+func onMainActor(_ body: @escaping @Sendable @MainActor () -> Void) {
+  if Thread.isMainThread {
+    MainActor.assumeIsolated(body)
+  } else {
+    Task { @MainActor in body() }
+  }
+}
+
 final class UnsafeMutable<Value: Sendable>: @unchecked Sendable {
   var value: Value
   init(_ value: Value) {
@@ -814,10 +890,10 @@ final class UnsafeMutable<Value: Sendable>: @unchecked Sendable {
   }
 }
 
-public protocol _Cancellable {
+public protocol _Cancellable: Sendable {
   func cancel()
 }
-private class _AnyCancellable: _Cancellable {
+final class _AnyCancellable: _Cancellable {
   private let canceller: @Sendable () -> Void
   init(canceller: @Sendable @escaping () -> Void) {
     self.canceller = canceller
