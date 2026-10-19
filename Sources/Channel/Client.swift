@@ -22,7 +22,7 @@ public extension Channel {
   }
   func connect(_ url: URL, state: State, options: ClientOptions<State> = ClientOptions()) -> ClientSender<State> {
     let ch = self
-    let ws = WebSocketClient(url: url, headers: options.headers)
+    let ws = WebSocketClient(url: url, headers: options.headers, requestTimeout: options.requestTimeout)
     let topics = UnsafeMutable(Set<String>())
     let sender = ChannelSender(ch: ch, connection: ws)
     
@@ -72,10 +72,13 @@ public extension Channel {
 public struct ClientOptions<State: Sendable> {
   public var headers: (() -> [String: String])?
   public var onConnect: (@Sendable (ChannelSender<State>) async throws -> Void)?
+  /// Default timeout in seconds for every post and subscription response. `nil` waits forever.
+  public var requestTimeout: TimeInterval?
   
-  public init(headers: (() -> [String: String])? = nil, onConnect: (@Sendable (ChannelSender<State>) async throws -> Void)? = nil) {
+  public init(headers: (() -> [String: String])? = nil, onConnect: (@Sendable (ChannelSender<State>) async throws -> Void)? = nil, requestTimeout: TimeInterval? = nil) {
     self.headers = headers
     self.onConnect = onConnect
+    self.requestTimeout = requestTimeout
   }
 }
 
@@ -129,7 +132,7 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
   public var onMessage: (([ReceivedResponse]) -> Void)?
   public var debug: Bool = false
   public var pendingCount: Int { pending.count }
-  private var pending = [Int: AnyEncodable]()
+  private var pending = PendingQueue()
   private var isWaiting = 0
   private var isWaitingLength = 0
   private var messageQueue = [AnyEncodable]()
@@ -141,19 +144,24 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
   }
   public var isConnectedChanged: ((Bool) -> ())?
   private var headers: (() -> [String: String])?
+  public let requestTimeout: TimeInterval?
+  /// Whether the client reconnects after drops. `stop()` turns it off, `start()` back on.
+  public private(set) var isRunning = true
   private var reconnectTimer: Timer?
   private let decoderQueue = DispatchQueue(label: "decoder")
   private let encoderQueue = DispatchQueue(label: "encoder")
   
-  public init(url: URL, headers: (() -> [String: String])? = nil) {
+  public init(url: URL, headers: (() -> [String: String])? = nil, requestTimeout: TimeInterval? = nil) {
     self.url = url
     self.headers = headers
+    self.requestTimeout = requestTimeout
     super.init()
     self.session = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
     start()
   }
   
   public func start() {
+    isRunning = true
     var request = URLRequest(url: url)
     if let headerProvider = headers {
       let headerFields = headerProvider()
@@ -201,6 +209,12 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
   private func disconnected() {
     isConnected = false
     webSocket = nil
+    messageQueue.removeAll()
+    isWaiting = 0
+    for entry in pending.dropped() {
+      entry.fail?(.disconnected)
+    }
+    guard isRunning else { return }
     
     // Schedule reconnection
     DispatchQueue.main.async {
@@ -213,21 +227,29 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
     }
   }
   
+  /// Stops reconnecting, closes the connection and fails every pending call with `disconnected`
   public func stop() {
-    pending.removeAll()
+    isRunning = false
     webSocket?.cancel(with: .goingAway, reason: nil)
     reconnectTimer?.invalidate()
+    for entry in pending.removeAll() {
+      entry.fail?(.disconnected)
+    }
   }
   
   @discardableResult
   public func send<Body: Encodable & Sendable>(_ body: Body) -> Int {
+    send(body, options: RequestOptions())
+  }
+  
+  @discardableResult
+  public func send<Body: Encodable>(_ body: Body, options: RequestOptions) -> Int {
     let id = self.id
     self.id += 1
-    pending[id] = AnyEncodable(body: body)
+    let body = AnyEncodable(body: body)
+    pending.add(id, PendingQueue.Entry(body: body, replay: options.replay, written: isConnected, fail: options.fail))
     
-    if webSocket == nil {
-      return id
-    }
+    guard isConnected else { return id }
     
     switch isWaiting {
     case 0:
@@ -246,7 +268,7 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
       trySend(body)
       isWaitingLength += 1
     case 2:
-      messageQueue.append(AnyEncodable(body: body))
+      messageQueue.append(body)
     case 3:
       trySend(body)
       isWaiting = 2
@@ -278,7 +300,7 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
   }
   
   public func cancel(_ id: Int) -> Bool {
-    pending.removeValue(forKey: id) != nil && !isConnected
+    pending.remove(id) != nil && !isConnected
   }
   
   public func notify<Body: Encodable & Sendable>(_ body: Body) {
@@ -286,7 +308,7 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
   }
   
   public func sent(_ id: Int) {
-    pending.removeValue(forKey: id)
+    pending.remove(id)
   }
   
   public func throttle() {
@@ -296,8 +318,10 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
   nonisolated public func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didOpenWithProtocol protocol: String?) {
     Task { @MainActor in
       isConnected = true
-      if !pending.isEmpty {
-        trySend(Array(pending.values))
+      // Unanswered requests go out again in their original order
+      let bodies = pending.flush()
+      if !bodies.isEmpty {
+        trySend(bodies)
       }
     }
     DispatchQueue.main.async { [weak self] in
@@ -308,13 +332,6 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
   nonisolated public func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didCloseWith closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
     Task { @MainActor in
       disconnected()
-    }
-  }
-  private struct AnyEncodable: Encodable, @unchecked Sendable {
-    let body: Encodable
-    func encode(to encoder: any Encoder) throws {
-      var container = encoder.singleValueContainer()
-      try container.encode(body)
     }
   }
   private var subscribed = [String: [Int: @MainActor (AnyBody) -> Void]]()
@@ -351,6 +368,61 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
         handler(body)
       }
     }
+  }
+}
+
+struct AnyEncodable: Encodable, @unchecked Sendable {
+  let body: Encodable
+  func encode(to encoder: any Encoder) throws {
+    var container = encoder.singleValueContainer()
+    try container.encode(body)
+  }
+}
+
+/// Requests waiting for a response, kept for replay after a reconnect
+struct PendingQueue {
+  struct Entry {
+    var body: AnyEncodable
+    var replay: Bool
+    /// Went out on the current connection
+    var written: Bool
+    var fail: (@Sendable @MainActor (ChannelError) -> Void)?
+  }
+  private var entries = [Int: Entry]()
+  var count: Int { entries.count }
+  var isEmpty: Bool { entries.isEmpty }
+  mutating func add(_ id: Int, _ entry: Entry) {
+    entries[id] = entry
+  }
+  @discardableResult
+  mutating func remove(_ id: Int) -> Entry? {
+    entries.removeValue(forKey: id)
+  }
+  /// Bodies in their original order (ids only grow), marked as written
+  mutating func flush() -> [AnyEncodable] {
+    entries.keys.sorted().map { id in
+      entries[id]!.written = true
+      return entries[id]!.body
+    }
+  }
+  /// The connection dropped: removes and returns the written requests that can't be replayed
+  mutating func dropped() -> [Entry] {
+    var failed = [Entry]()
+    for id in entries.keys.sorted() {
+      guard let entry = entries[id], entry.written else { continue }
+      if entry.replay {
+        entries[id]!.written = false
+      } else {
+        entries[id] = nil
+        failed.append(entry)
+      }
+    }
+    return failed
+  }
+  mutating func removeAll() -> [Entry] {
+    let all = entries.keys.sorted().map { entries[$0]! }
+    entries.removeAll()
+    return all
   }
 }
 

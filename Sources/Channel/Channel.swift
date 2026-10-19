@@ -33,13 +33,47 @@ public protocol ConnectionInterface: Sendable {
   func notify<Body: Encodable>(_ body: Body)
   func addTopic(topic: String, event: @escaping @MainActor (AnyBody) -> Void) -> @Sendable @MainActor () -> Bool
   func stop()
+  /// Sends a request that waits for a response. `options.fail` is called when the connection gives up on it.
+  @discardableResult
+  func send<Body: Encodable>(_ body: Body, options: RequestOptions) -> Int
+  /// Default timeout in seconds for posts and subscription responses
+  var requestTimeout: TimeInterval? { get }
+}
+public extension ConnectionInterface {
+  @discardableResult
+  func send<Body: Encodable>(_ body: Body, options: RequestOptions) -> Int {
+    send(body)
+  }
+  var requestTimeout: TimeInterval? { nil }
 }
 
+/// How a connection treats a pending request
+public struct RequestOptions: Sendable {
+  /// Send the request again after a reconnect when it was written to the socket and got no response
+  public var replay: Bool
+  /// Called when the request fails without a response: `disconnected` after a drop with `replay: false`, or on `stop()`
+  public var fail: (@Sendable @MainActor (ChannelError) -> Void)?
+  public init(replay: Bool = true, fail: (@Sendable @MainActor (ChannelError) -> Void)? = nil) {
+    self.replay = replay
+    self.fail = fail
+  }
+}
 
 public struct SendOptions<Context: Encodable & Sendable>: Sendable {
   public var context: Context?
-  public init(context: Context? = nil) {
+  /// Seconds to wait for the response (posts and subscription responses, not stream values). Fails with code `timeout`.
+  public var timeout: TimeInterval?
+  /// Send the request again after a reconnect. With `false`, a request already written fails with `disconnected`.
+  public var replay: Bool
+  public init(context: Context? = nil, timeout: TimeInterval? = nil, replay: Bool = true) {
     self.context = context
+    self.timeout = timeout
+    self.replay = replay
+  }
+}
+public extension SendOptions where Context == EmptyCodable {
+  init(timeout: TimeInterval? = nil, replay: Bool = true) {
+    self.init(context: nil, timeout: timeout, replay: replay)
   }
 }
 
@@ -239,6 +273,8 @@ public struct ChannelError: Error, CustomStringConvertible, Codable, Sendable {
       text = "internal error"
     }
   }
+  static var timeout: ChannelError { ChannelError(text: "timeout", code: .timeout) }
+  static var disconnected: ChannelError { ChannelError(text: "disconnected", code: .disconnected) }
   static func decoding(_ error: Error) -> ChannelError {
     if let error = error as? ChannelError { return error }
     return ChannelError(text: "decoding: \(error)", code: .decoding)
@@ -611,9 +647,12 @@ public struct ChannelSender<State: Sendable>: Sender, @unchecked Sendable {
   }
   
   public func send<Body: Encodable & Sendable, Context: Encodable & Sendable, Output: Decodable>(_ path: String, _ body: Body?, options: SendOptions<Context>?) async throws -> Output {
+    let ch = self.ch
+    let connection = self.connection
     return try await withCheckedThrowingContinuation { continuation in
-      let id = UnsafeMutable<Int?>(nil)
-      let request = self.ch.makeRequest(path, body, options) { response in
+      let call = PendingCall()
+      let request = ch.makeRequest(path, body, options) { response in
+        call.finish(connection)
         if let error = response.channelError {
           continuation.resume(throwing: error)
         } else {
@@ -623,11 +662,15 @@ public struct ChannelSender<State: Sendable>: Sender, @unchecked Sendable {
             continuation.resume(throwing: ChannelError.decoding(error))
           }
         }
-        if let id = id.value {
-          self.connection.sent(id)
-        }
       }
-      id.value = self.connection.send(request)
+      let rid = request.id
+      let fail: @Sendable @MainActor (ChannelError) -> Void = { error in
+        guard ch.requests.removeValue(forKey: rid) != nil else { return }
+        call.timer?.cancel()
+        continuation.resume(throwing: error)
+      }
+      call.id = connection.send(request, options: RequestOptions(replay: options?.replay ?? true, fail: fail))
+      call.startTimer(options?.timeout ?? connection.requestTimeout, rid: rid, connection: connection, fail: fail)
     }
   }
   
@@ -644,6 +687,8 @@ public struct ChannelSender<State: Sendable>: Sender, @unchecked Sendable {
     return try await withCheckedThrowingContinuation { continuation in
       let sub = SubscriptionCall(continuation: continuation)
       let request = ch.makeSubscription(path, body, options) { response in
+        sub.timer?.cancel()
+        sub.timer = nil
         if let error = response.channelError {
           // Refused, on the first try or on a resubscribe after a reconnect: the subscription ends
           sub.end(ch: ch, connection: connection)
@@ -673,8 +718,25 @@ public struct ChannelSender<State: Sendable>: Sender, @unchecked Sendable {
           }
         }
       }
-      sub.rid = request.id
-      sub.id = connection.send(request)
+      let rid = request.id
+      sub.rid = rid
+      let fail: @Sendable @MainActor (ChannelError) -> Void = { error in
+        sub.end(ch: ch, connection: connection)
+        sub.resume(throwing: error)
+      }
+      // Active subscriptions are always sent again after a reconnect
+      sub.id = connection.send(request, options: RequestOptions(replay: true, fail: fail))
+      if let timeout = options?.timeout ?? connection.requestTimeout, timeout > 0 {
+        sub.timer = Task { @MainActor in
+          try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+          guard !Task.isCancelled, sub.isWaiting, let id = sub.id else { return }
+          let written = !connection.cancel(id)
+          fail(.timeout)
+          if written {
+            connection.notify(CancellationRequest(cancel: rid))
+          }
+        }
+      }
     }
   }
   
@@ -731,7 +793,7 @@ public class ValuesIterator<State: Sendable, Body: Encodable & Sendable, Context
   private func onCancel(id: Int) {
     isCompleted = true
     if let connectionRequestId, !self.connection.cancel(connectionRequestId) {
-      _ = self.connection.notify(CancellationRequest(cancel: connectionRequestId))
+      _ = self.connection.notify(CancellationRequest(cancel: id))
     }
   }
   
@@ -748,16 +810,25 @@ public class ValuesIterator<State: Sendable, Body: Encodable & Sendable, Context
     if self.isRunning { return }
     self.isRunning = true
     let request = self.ch.makeStream(path, body, options) { response in
-      let result = Result<Element?, Error> { try response.parseStream() }
-      if !self.pending.isEmpty {
-        let pendingClosure = self.pending.removeFirst()
-        pendingClosure(result)
-      } else {
-        self.queued.append(result)
-      }
+      self.deliver(Result<Element?, Error> { try response.parseStream() })
     }
-    self.rid = request.id
-    connectionRequestId = self.connection.send(request)
+    let rid = request.id
+    self.rid = rid
+    let ch = self.ch
+    connectionRequestId = self.connection.send(request, options: RequestOptions(replay: options?.replay ?? true) { [weak self] error in
+      guard ch.requests.removeValue(forKey: rid) != nil else { return }
+      self?.deliver(.failure(error))
+    })
+  }
+  
+  @MainActor
+  private func deliver(_ result: Result<Element?, Error>) {
+    if !self.pending.isEmpty {
+      let pendingClosure = self.pending.removeFirst()
+      pendingClosure(result)
+    } else {
+      self.queued.append(result)
+    }
   }
   
   @MainActor
@@ -802,11 +873,11 @@ public class ValuesIterator<State: Sendable, Body: Encodable & Sendable, Context
     }
   }
   deinit {
-    if !isCompleted, let connectionRequestId {
+    if !isCompleted, let connectionRequestId, let rid {
       let c = connection
       Task { @MainActor in
         if !c.cancel(connectionRequestId) {
-          _ = c.notify(CancellationRequest(cancel: connectionRequestId))
+          _ = c.notify(CancellationRequest(cancel: rid))
         }
       }
     }
@@ -828,6 +899,33 @@ private extension ReceivedResponse {
   }
 }
 
+/// State of one post call: the connection's id for it and its timeout
+@MainActor
+final class PendingCall: Sendable {
+  var id: Int?
+  var timer: Task<Void, Never>?
+  func finish(_ connection: ConnectionInterface) {
+    timer?.cancel()
+    timer = nil
+    if let id {
+      connection.sent(id)
+    }
+  }
+  func startTimer(_ timeout: TimeInterval?, rid: Int, connection: ConnectionInterface, fail: @escaping @Sendable @MainActor (ChannelError) -> Void) {
+    guard let timeout, timeout > 0 else { return }
+    timer = Task { @MainActor [weak self] in
+      try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+      guard !Task.isCancelled, let id = self?.id else { return }
+      // `cancel` returns false when the request already went out, then the server gets `{cancel}`
+      let written = !connection.cancel(id)
+      fail(.timeout)
+      if written {
+        connection.notify(CancellationRequest(cancel: rid))
+      }
+    }
+  }
+}
+
 /// State of one subscription, shared by its response handler and its cancellable
 @MainActor
 final class SubscriptionCall: Sendable {
@@ -836,6 +934,7 @@ final class SubscriptionCall: Sendable {
   var rid: Int?
   var topic: String?
   var removeTopic: (@Sendable @MainActor () -> Bool)?
+  var timer: Task<Void, Never>?
   private var isEnded = false
   var isWaiting: Bool { continuation != nil }
   init(continuation: CheckedContinuation<_Cancellable, Error>) {
@@ -855,6 +954,8 @@ final class SubscriptionCall: Sendable {
   func end<State>(ch: Channel<State>, connection: ConnectionInterface) {
     guard !isEnded else { return }
     isEnded = true
+    timer?.cancel()
+    timer = nil
     if let rid {
       ch.requests[rid] = nil
     }
