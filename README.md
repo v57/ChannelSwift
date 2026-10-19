@@ -102,6 +102,7 @@ subscription.cancel()     // or release it
 
 - The response body is the first event (a snapshot). After a reconnect the client subscribes again and the new
   response delivers a fresh snapshot. Events published while disconnected are lost.
+- `body.isSnapshot` tells a snapshot (`true`) from a published event (`false`).
 - A response without a topic is one-shot: its body is delivered once and the subscription ends.
 - Events are delivered whenever the message has a `body`, including `0`, `false`, `""` and `null`.
 - Cancelled subscriptions are not sent again after a reconnect. A resubscribe the server refuses ends the subscription.

@@ -700,7 +700,7 @@ public struct ChannelSender<State: Sendable>: Sender, @unchecked Sendable {
             sub.removeTopic = connection.addTopic(topic: topic, event: event)
           }
           if response.hasBody {
-            event(response.anyBody)
+            event(AnyBody(container: response.container, isSnapshot: true))
           }
           // Only the first response returns a cancellable: releasing one cancels the subscription
           if sub.isWaiting {
@@ -711,7 +711,7 @@ public struct ChannelSender<State: Sendable>: Sender, @unchecked Sendable {
         } else {
           sub.end(ch: ch, connection: connection)
           if response.hasBody {
-            event(response.anyBody)
+            event(AnyBody(container: response.container, isSnapshot: true))
           }
           if sub.isWaiting {
             sub.resume(returning: _AnyCancellable(subscription: sub) { })
@@ -1088,9 +1088,13 @@ private struct CancellationRequest: Encodable {
 public struct AnyBody: @unchecked Sendable {
   private let container: KeyedDecodingContainer<ReceivedResponse.CodingKeys>
   private let key: ReceivedResponse.CodingKeys
-  init(container: KeyedDecodingContainer<ReceivedResponse.CodingKeys>, key: ReceivedResponse.CodingKeys = .body) {
+  /// In a subscription handler: `true` for the subscription response body (the first one, and the fresh one after a
+  /// reconnect), `false` for published events
+  public let isSnapshot: Bool
+  init(container: KeyedDecodingContainer<ReceivedResponse.CodingKeys>, key: ReceivedResponse.CodingKeys = .body, isSnapshot: Bool = false) {
     self.container = container
     self.key = key
+    self.isSnapshot = isSnapshot
   }
   /// Decodes the value. Use an optional type to accept `null` or a missing value.
   public func decode<T: Decodable>(_ type: T.Type = T.self) throws -> T {

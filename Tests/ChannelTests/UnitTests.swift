@@ -188,6 +188,7 @@ struct UnitTests {
     #expect(h.connection.pending.count == 1)
     h.receive(#"{"id":0,"topic":"room/a","body":"again"}"#)
     #expect(events.values.last == .string("again"))
+    #expect(events.snapshots == [true, false, false, false, false, true])
 
     token.cancel()
     #expect(!token.isSubscribed)

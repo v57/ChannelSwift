@@ -119,6 +119,7 @@ struct WireV2Tests {
     try await client.send("v2/publish", Publish(room: room, body: 7))
     #expect(await waitUntil { events.values.count == 3 })
     #expect(events.values.last == .int(7))
+    #expect(events.snapshots == [true, true, false])
     token.cancel()
   }
 

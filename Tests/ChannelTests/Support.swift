@@ -107,9 +107,11 @@ enum JSONValue: Decodable, Equatable, Sendable {
 @MainActor
 final class Events {
   var values = [JSONValue]()
+  var snapshots = [Bool]()
   var handler: @Sendable @MainActor (AnyBody) -> Void {
     { [weak self] body in
       self?.values.append((try? body.decode(JSONValue.self)) ?? .string("<undecodable>"))
+      self?.snapshots.append(body.isSnapshot)
     }
   }
 }
