@@ -121,6 +121,20 @@ struct UnitTests {
     #expect(c?.code == nil)
   }
 
+  @Test("handlers read the request context, not the body")
+  func requestContext() async throws {
+    struct Caller: Codable, Sendable { var key: String }
+    let h = Harness()
+    let received = Received()
+    _ = h.channel.post("ctx") { (body: Body<Int, Caller?, Void>) in
+      await received.set("\(body.body) \(body.context?.key ?? "none")")
+      return body.body
+    }
+    h.receive(#"[{"id":0,"path":"ctx","body":1,"context":{"key":"k"}},{"id":1,"path":"ctx","body":2}]"#)
+    #expect(await waitUntil { received.values.count == 2 })
+    #expect(received.values.sorted() == ["1 k", "2 none"])
+  }
+
   @Test("a reply that doesn't decode fails with decoding")
   func decoding() async throws {
     let h = Harness()
@@ -378,4 +392,10 @@ struct UnitTests {
     let encoded = String(decoding: try! JSONEncoder().encode(Response(id: 1, error: ChannelError(text: "api not found", code: .notFound))), as: UTF8.self)
     #expect(encoded.contains(#""code":"not_found""#))
   }
+}
+
+@MainActor
+private final class Received: Sendable {
+  var values = [String]()
+  func set(_ value: String) { values.append(value) }
 }

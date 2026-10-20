@@ -1108,11 +1108,12 @@ public struct AnyBody: @unchecked Sendable {
       try container.decode(Body.self, forKey: key)
     }
   }
-  func context<Body: Decodable>() throws -> Body {
-    if let optional = Body.self as? any OptionalDecodable.Type {
-      try optional.decode(container, key: .body) as! Body
+  /// Decodes the request's `context`. Use an optional type to accept `null` or a missing value.
+  public func context<Context: Decodable>(_ type: Context.Type = Context.self) throws -> Context {
+    if let optional = Context.self as? any OptionalDecodable.Type {
+      try optional.decode(container, key: .context) as! Context
     } else {
-      try container.decode(Body.self, forKey: .body)
+      try container.decode(Context.self, forKey: .context)
     }
   }
 }
