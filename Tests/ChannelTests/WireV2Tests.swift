@@ -358,6 +358,24 @@ struct WireV2Tests {
     #expect(client.connectionState == .connected)
   }
 
+  @Test("reconnect drops an open connection and connects again with fresh headers")
+  func reconnectOpen() async throws {
+    let opened = Events()
+    let client = await Fixture.client(ClientOptions(headers: {
+      opened.values.append(.int(opened.values.count))
+      return [:]
+    }))
+    defer { client.stop() }
+    #expect(opened.values.count == 1)
+    var seen = [ConnectionState]()
+    let observer = client.onStateChange { seen.append($0) }
+    client.ws.reconnect()
+    #expect(await waitUntil(1) { seen.last == .connected && seen.contains(.disconnected) })
+    #expect(opened.values.count == 2)
+    let _: String = try await client.send("hello")
+    observer.cancel()
+  }
+
   @Test("pings keep the connection open")
   func ping() async throws {
     let client = await Fixture.client(ClientOptions(pingInterval: 0.05))

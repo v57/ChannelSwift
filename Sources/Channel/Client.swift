@@ -357,6 +357,18 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
     }
   }
   
+  /// Drops the open connection and connects again at once, as after a network drop: calls that can be replayed and
+  /// subscriptions are sent again, the others fail with `disconnected`. Use it when the connect headers changed.
+  public func reconnect() {
+    guard isRunning else { return }
+    attempts = 0
+    if connectionState == .connected, let webSocket {
+      connectionLost(webSocket)
+    } else {
+      reconnectNow()
+    }
+  }
+
   /// Stops reconnecting, closes the connection and fails every pending call with `disconnected`
   public func stop() {
     isRunning = false
