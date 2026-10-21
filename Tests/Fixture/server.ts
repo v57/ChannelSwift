@@ -133,6 +133,8 @@ const server = Bun.serve<State, {}>({
   hostname: '127.0.0.1',
   port,
   fetch(request, server) {
+    // Refuses the upgrade like hub-pro does for a key it doesn't accept
+    if (new URL(request.url).pathname === '/refuse') return new Response('unauthorized', { status: 401 })
     const headers: Record<string, string> = {}
     request.headers.forEach((value, key) => (headers[key] = value))
     if (server.upgrade(request, { data: { headers, rate: [] } })) return

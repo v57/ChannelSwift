@@ -53,8 +53,12 @@ public struct RequestOptions: Sendable {
   public var replay: Bool
   /// Called when the request fails without a response: `disconnected` after a drop with `replay: false`, or on `stop()`
   public var fail: (@Sendable @MainActor (ChannelError) -> Void)?
-  public init(replay: Bool = true, fail: (@Sendable @MainActor (ChannelError) -> Void)? = nil) {
+  /// Fail with `refused` when the server refuses the connection, instead of waiting for a later connect.
+  /// Posts do; subscriptions and streams wait, so they resume when the server accepts the connection again.
+  public var failsWhenRefused: Bool
+  public init(replay: Bool = true, failsWhenRefused: Bool = true, fail: (@Sendable @MainActor (ChannelError) -> Void)? = nil) {
     self.replay = replay
+    self.failsWhenRefused = failsWhenRefused
     self.fail = fail
   }
 }
@@ -222,6 +226,8 @@ public struct ChannelError: Error, CustomStringConvertible, Codable, Sendable {
     public static let timeout: Code = "timeout"
     /// Client only: the connection dropped and the request can't be replayed, or `stop()` was called
     public static let disconnected: Code = "disconnected"
+    /// The server refused the connection (the WebSocket upgrade got an HTTP error)
+    public static let refused: Code = "refused"
     /// Client only: the response didn't decode into the expected type
     public static let decoding: Code = "decoding"
     public init(integerLiteral value: Int) { self = .int(value) }
@@ -275,6 +281,7 @@ public struct ChannelError: Error, CustomStringConvertible, Codable, Sendable {
   }
   static var timeout: ChannelError { ChannelError(text: "timeout", code: .timeout) }
   static var disconnected: ChannelError { ChannelError(text: "disconnected", code: .disconnected) }
+  static func refused(_ refusal: ConnectionRefusal) -> ChannelError { ChannelError(text: refusal.description, code: .refused) }
   static func decoding(_ error: Error) -> ChannelError {
     if let error = error as? ChannelError { return error }
     return ChannelError(text: "decoding: \(error)", code: .decoding)
@@ -725,7 +732,7 @@ public struct ChannelSender<State: Sendable>: Sender, @unchecked Sendable {
         sub.cancel(ch: ch, connection: connection)
         sub.resume(throwing: error)
       }
-      sub.id = connection.send(request, options: RequestOptions(replay: options?.replay ?? true, fail: fail))
+      sub.id = connection.send(request, options: RequestOptions(replay: options?.replay ?? true, failsWhenRefused: false, fail: fail))
       if let timeout = options?.timeout ?? connection.requestTimeout, timeout > 0 {
         sub.timer = Task { @MainActor in
           try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
@@ -815,7 +822,7 @@ public class ValuesIterator<State: Sendable, Body: Encodable & Sendable, Context
     let rid = request.id
     self.rid = rid
     let ch = self.ch
-    connectionRequestId = self.connection.send(request, options: RequestOptions(replay: options?.replay ?? true) { [weak self] error in
+    connectionRequestId = self.connection.send(request, options: RequestOptions(replay: options?.replay ?? true, failsWhenRefused: false) { [weak self] error in
       guard ch.requests.removeValue(forKey: rid) != nil else { return }
       self?.deliver(.failure(error))
     })

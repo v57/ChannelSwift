@@ -124,6 +124,8 @@ public extension ClientSender {
   func reconnectNow() {
     ws.reconnectNow()
   }
+  /// Set while the server refuses the connection
+  var refusal: ConnectionRefusal? { ws.refusal }
 }
 
 // MARK: - ChannelController
@@ -154,6 +156,18 @@ private struct ChannelController<State: Sendable>: Controller {
 }
 
 // MARK: - WebSocketClient
+/// The server answered the WebSocket upgrade with an HTTP error instead of opening the connection, e.g. `401` for a
+/// key it doesn't accept. The response body isn't available to URLSession WebSocket tasks, so only the status is.
+public struct ConnectionRefusal: Error, Sendable, Hashable, CustomStringConvertible {
+  public var statusCode: Int
+  public init(statusCode: Int) {
+    self.statusCode = statusCode
+  }
+  public var description: String {
+    "connection refused (HTTP \(statusCode) \(HTTPURLResponse.localizedString(forStatusCode: statusCode)))"
+  }
+}
+
 public enum ConnectionState: Sendable, Hashable {
   case disconnected, connecting, connected
 }
@@ -181,6 +195,13 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
     }
   }
   public var isConnectedChanged: ((Bool) -> ())?
+  /// Set while the server refuses the connection; cleared when a connection opens. Posts fail with `refused` then,
+  /// subscriptions and streams wait for a connection.
+  public private(set) var refusal: ConnectionRefusal?
+  /// Called each time the server refuses the connection
+  public var onRefused: ((ConnectionRefusal) -> Void)?
+  /// Seconds between attempts while the server refuses the connection
+  public var refusedRetryDelay: TimeInterval = 30
   public private(set) var connectionState: ConnectionState = .disconnected {
     didSet {
       guard connectionState != oldValue else { return }
@@ -275,7 +296,11 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
           // Continue receiving messages
           self.receiveMessage(task)
         case .failure:
-          self.connectionLost(task)
+          if let refusal = Self.refusal(of: task, opened: self.connectionState == .connected) {
+            self.refused(task, refusal)
+          } else {
+            self.connectionLost(task)
+          }
         }
       }
     }
@@ -318,6 +343,40 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
     scheduleReconnect()
   }
   
+  /// An upgrade the server answered with an HTTP client error (`4xx`) instead of `101`
+  static func refusal(of task: URLSessionWebSocketTask, opened: Bool) -> ConnectionRefusal? {
+    guard !opened, let response = task.response as? HTTPURLResponse,
+          (400..<500).contains(response.statusCode) else { return nil }
+    return ConnectionRefusal(statusCode: response.statusCode)
+  }
+
+  /// The server refused the connection: fails the posts, keeps subscriptions and streams, and tries again after
+  /// `refusedRetryDelay` instead of the usual backoff
+  func refused(_ task: URLSessionWebSocketTask?, _ refusal: ConnectionRefusal) {
+    guard let task, task === webSocket else { return }
+    webSocket = nil
+    task.cancel(with: .goingAway, reason: nil)
+    stopPing()
+    messageQueue.removeAll()
+    isWaiting = 0
+    connectionState = .disconnected
+    self.refusal = refusal
+    for entry in pending.refused() {
+      entry.fail?(.refused(refusal))
+    }
+    if debug { print("ws:", refusal) }
+    onRefused?(refusal)
+    guard isRunning else { return }
+    reconnectTask?.cancel()
+    let delay = refusedRetryDelay
+    reconnectTask = Task { @MainActor [weak self] in
+      try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+      guard !Task.isCancelled, let self, self.isRunning else { return }
+      self.reconnectTask = nil
+      self.start()
+    }
+  }
+
   /// Retries after 100 ms, doubling up to 5 s while the server stays down, each delay randomized to 50-100%
   static func reconnectDelay(attempts: Int, random: Double = .random(in: 0...1)) -> TimeInterval {
     min(5, 0.1 * pow(2, Double(min(attempts, 16)))) * (0.5 + random / 2)
@@ -399,7 +458,13 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
     let id = self.id
     self.id += 1
     let encodable = AnyEncodable(body: body)
-    pending.add(id, PendingQueue.Entry(body: encodable, replay: options.replay, written: isConnected, fail: options.fail))
+    if let refusal, !isConnected, options.failsWhenRefused {
+      // Fails at once instead of waiting for a server that refuses the connection; after the caller has the id
+      let fail = options.fail
+      DispatchQueue.main.async { fail?(.refused(refusal)) }
+      return id
+    }
+    pending.add(id, PendingQueue.Entry(body: encodable, replay: options.replay, written: isConnected, failsWhenRefused: options.failsWhenRefused, fail: options.fail))
     
     guard isConnected else { return id }
     
@@ -578,6 +643,7 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
     Task { @MainActor in
       guard webSocketTask === webSocket else { return }
       attempts = 0
+      refusal = nil
       connectionState = .connected
       // Unanswered requests go out again in their original order
       let bodies = pending.flush()
@@ -646,6 +712,7 @@ struct PendingQueue {
     var replay: Bool
     /// Went out on the current connection
     var written: Bool
+    var failsWhenRefused = true
     var fail: (@Sendable @MainActor (ChannelError) -> Void)?
   }
   private var entries = [Int: Entry]()
@@ -678,6 +745,11 @@ struct PendingQueue {
       }
     }
     return failed
+  }
+  /// The server refused the connection: removes and returns the requests that fail then
+  mutating func refused() -> [Entry] {
+    let ids = entries.keys.sorted().filter { entries[$0]!.failsWhenRefused }
+    return ids.map { entries.removeValue(forKey: $0)! }
   }
   mutating func removeAll() -> [Entry] {
     let all = entries.keys.sorted().map { entries[$0]! }

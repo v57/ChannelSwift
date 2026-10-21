@@ -376,6 +376,34 @@ struct WireV2Tests {
     observer.cancel()
   }
 
+  @Test("a refused upgrade fails posts at once, keeps streams and backs off")
+  func refused() async throws {
+    await Fixture.start()
+    let channel = Channel<Void>()
+    let client = channel.connect(URL(string: "ws://127.0.0.1:\(Fixture.port)/refuse")!)
+    defer { client.stop() }
+    client.ws.refusedRetryDelay = 60
+    var refusals = [ConnectionRefusal]()
+    client.ws.onRefused = { refusals.append($0) }
+    // Waiting before the refusal
+    let waiting = Task { try await client.send("hello") as String }
+    let stream: Values<Void, EmptyCodable, EmptyCodable, Int> = client.values("v2/stream")
+    let streaming = Task { for try await _ in stream { } }
+    #expect(await channelError { _ = try await waiting.value }?.code == .refused)
+    #expect(refusals == [ConnectionRefusal(statusCode: 401)])
+    #expect(client.refusal == ConnectionRefusal(statusCode: 401))
+    #expect(client.connectionState == .disconnected)
+    // After the refusal: fails at once instead of waiting 60 s for the next attempt
+    let error = await channelError { let _: String = try await client.send("hello") }
+    #expect(error?.code == .refused)
+    #expect(error?.text.contains("401") == true)
+    // The stream stays queued for a later connection, and there is no blind retry
+    await sleep(seconds: 0.5)
+    #expect(client.ws.pendingCount == 1)
+    #expect(refusals.count == 1)
+    streaming.cancel()
+  }
+
   @Test("pings keep the connection open")
   func ping() async throws {
     let client = await Fixture.client(ClientOptions(pingInterval: 0.05))
