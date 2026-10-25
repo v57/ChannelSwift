@@ -426,4 +426,84 @@ struct WireV2Tests {
     #expect(await waitUntil { seen.contains(.disconnected) })
     observer.cancel()
   }
+
+  @Test("an address that refuses at once gives way to the alternate")
+  func alternateAfterFailure() async throws {
+    await Fixture.start()
+    let closed = closedPort()
+    let fixture = URL(string: "ws://127.0.0.1:\(Fixture.port)")!
+    let client = Channel<Void>().connect(URL(string: "ws://127.0.0.1:\(closed)")!, options: ClientOptions(alternateURLs: { [fixture] }))
+    defer { client.stop() }
+    #expect(await waitUntil { client.connectionState == .connected })
+    #expect(client.ws.currentURL == fixture)
+    // It stays on the address that opened
+    await reconnect(client)
+    #expect(client.ws.currentURL == fixture)
+  }
+
+  @Test("an address that doesn't answer gives way to the alternate after openTimeout")
+  func alternateAfterTimeout() async throws {
+    await Fixture.start()
+    let silent = try SilentListener()
+    defer { silent.close() }
+    let fixture = URL(string: "ws://127.0.0.1:\(Fixture.port)")!
+    let client = Channel<Void>().connect(
+      URL(string: "ws://127.0.0.1:\(silent.port)")!,
+      options: ClientOptions(alternateURLs: { [fixture] }, openTimeout: 0.3)
+    )
+    defer { client.stop() }
+    #expect(client.ws.currentURL.port == Int(silent.port))
+    #expect(await waitUntil(2) { client.connectionState == .connected })
+    #expect(client.ws.currentURL == fixture)
+    let _: String = try await client.send("hello")
+  }
+
+  @Test("without alternates the address and backoff stay as they were")
+  func noAlternates() async throws {
+    let url = URL(string: "ws://127.0.0.1:\(closedPort())")!
+    let client = Channel<Void>().connect(url)
+    defer { client.stop() }
+    await sleep(seconds: 0.3)
+    #expect(client.connectionState != .connected)
+    #expect(client.ws.currentURL == url)
+  }
+}
+
+/// A port nothing listens on: connections to it are refused at once
+private func closedPort() -> UInt16 {
+  let fd = socket(AF_INET, SOCK_STREAM, 0)
+  defer { close(fd) }
+  var address = sockaddr_in()
+  address.sin_family = sa_family_t(AF_INET)
+  address.sin_addr.s_addr = inet_addr("127.0.0.1")
+  var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+  withUnsafeMutablePointer(to: &address) {
+    $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+      _ = bind(fd, $0, length)
+      _ = getsockname(fd, $0, &length)
+    }
+  }
+  return UInt16(bigEndian: address.sin_port)
+}
+
+/// Accepts TCP connections into its backlog and never answers, like a host that doesn't serve the upgrade
+private final class SilentListener {
+  let fd: Int32
+  let port: UInt16
+  init() throws {
+    let fd = socket(AF_INET, SOCK_STREAM, 0)
+    var address = sockaddr_in()
+    address.sin_family = sa_family_t(AF_INET)
+    address.sin_addr.s_addr = inet_addr("127.0.0.1")
+    var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+    let bound = withUnsafeMutablePointer(to: &address) {
+      $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+        bind(fd, $0, length) == 0 && listen(fd, 8) == 0 && getsockname(fd, $0, &length) == 0
+      }
+    }
+    guard bound else { throw POSIXError(.EADDRINUSE) }
+    self.fd = fd
+    port = UInt16(bigEndian: address.sin_port)
+  }
+  func close() { Darwin.close(fd) }
 }

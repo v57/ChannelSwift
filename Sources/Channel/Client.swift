@@ -25,7 +25,7 @@ public extension Channel {
   }
   func connect(_ url: URL, state: State, options: ClientOptions<State> = ClientOptions()) -> ClientSender<State> {
     let ch = self
-    let ws = WebSocketClient(url: url, headers: options.headers, requestTimeout: options.requestTimeout, pingInterval: options.pingInterval, maximumMessageSize: options.maximumMessageSize, reconnectOnNetworkChange: options.reconnectOnNetworkChange)
+    let ws = WebSocketClient(url: url, headers: options.headers, requestTimeout: options.requestTimeout, pingInterval: options.pingInterval, maximumMessageSize: options.maximumMessageSize, reconnectOnNetworkChange: options.reconnectOnNetworkChange, alternateURLs: options.alternateURLs, openTimeout: options.openTimeout)
     let topics = UnsafeMutable(Set<String>())
     let sender = ChannelSender(ch: ch, connection: ws)
     
@@ -88,14 +88,21 @@ public struct ClientOptions<State: Sendable> {
   public var maximumMessageSize: Int
   /// Calls `reconnectNow()` when the network path changes (where the `Network` framework is available)
   public var reconnectOnNetworkChange: Bool
+  /// Other addresses of the same server, evaluated before every connection attempt. An attempt that fails or doesn't
+  /// open within `openTimeout` moves on to the next address at once; the backoff applies once all of them failed.
+  public var alternateURLs: (@MainActor () async -> [URL])?
+  /// Seconds an attempt may take to open while there are alternate addresses
+  public var openTimeout: TimeInterval
   
-  public init(headers: (@MainActor () async -> [String: String])? = nil, onConnect: (@Sendable (ChannelSender<State>) async throws -> Void)? = nil, requestTimeout: TimeInterval? = nil, pingInterval: TimeInterval = 15, maximumMessageSize: Int = 16 << 20, reconnectOnNetworkChange: Bool = true) {
+  public init(headers: (@MainActor () async -> [String: String])? = nil, onConnect: (@Sendable (ChannelSender<State>) async throws -> Void)? = nil, requestTimeout: TimeInterval? = nil, pingInterval: TimeInterval = 15, maximumMessageSize: Int = 16 << 20, reconnectOnNetworkChange: Bool = true, alternateURLs: (@MainActor () async -> [URL])? = nil, openTimeout: TimeInterval = 5) {
     self.headers = headers
     self.onConnect = onConnect
     self.requestTimeout = requestTimeout
     self.pingInterval = pingInterval
     self.maximumMessageSize = maximumMessageSize
     self.reconnectOnNetworkChange = reconnectOnNetworkChange
+    self.alternateURLs = alternateURLs
+    self.openTimeout = openTimeout
   }
 }
 
@@ -175,6 +182,17 @@ public enum ConnectionState: Sendable, Hashable {
 public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, ConnectionInterface, @unchecked Sendable {
   private var id: Int = 0
   private let url: URL
+  /// The address of the open connection or of the attempt in progress: `url` or one of the alternates
+  public private(set) var currentURL: URL
+  private let alternateURLs: (@MainActor () async -> [URL])?
+  /// Seconds an attempt may take to open while there are alternate addresses
+  public var openTimeout: TimeInterval
+  /// Index of the address the next attempt uses, `url` first. It stays on an address that opened, and goes back to
+  /// `url` when the network changes while disconnected.
+  private var urlIndex = 0
+  /// Addresses the last attempt chose from
+  private var urlCount = 1
+  private var openTimeoutTask: Task<Void, Never>?
   private var webSocket: URLSessionWebSocketTask?
   var currentTask: URLSessionWebSocketTask? { webSocket }
   /// Created on the first connection attempt and invalidated by `stop()`, since a session keeps its delegate alive
@@ -236,8 +254,11 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
   private let decoderQueue = DispatchQueue(label: "decoder")
   private let encoderQueue = DispatchQueue(label: "encoder")
   
-  public init(url: URL, headers: (@MainActor () async -> [String: String])? = nil, requestTimeout: TimeInterval? = nil, pingInterval: TimeInterval = 15, maximumMessageSize: Int = 16 << 20, reconnectOnNetworkChange: Bool = true) {
+  public init(url: URL, headers: (@MainActor () async -> [String: String])? = nil, requestTimeout: TimeInterval? = nil, pingInterval: TimeInterval = 15, maximumMessageSize: Int = 16 << 20, reconnectOnNetworkChange: Bool = true, alternateURLs: (@MainActor () async -> [URL])? = nil, openTimeout: TimeInterval = 5) {
     self.url = url
+    currentURL = url
+    self.alternateURLs = alternateURLs
+    self.openTimeout = openTimeout
     self.headers = headers
     self.requestTimeout = requestTimeout
     self.pingInterval = pingInterval
@@ -256,20 +277,25 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
     reconnectTask = nil
     attempt += 1
     connectionState = .connecting
-    if let headers {
+    if headers != nil || alternateURLs != nil {
       let attempt = self.attempt
       Task { @MainActor in
-        let fields = await headers()
+        let urls = [self.url] + (await self.alternateURLs?() ?? [])
+        let fields = await self.headers?() ?? [:]
         guard self.attempt == attempt, self.isRunning, self.webSocket == nil else { return }
-        self.open(headers: fields)
+        self.open(urls: urls, headers: fields)
       }
     } else {
-      open(headers: [:])
+      open(urls: [url], headers: [:])
     }
   }
   
-  private func open(headers: [String: String]) {
-    var request = URLRequest(url: url)
+  private func open(urls: [URL], headers: [String: String]) {
+    urlCount = urls.count
+    if urlIndex >= urls.count { urlIndex = 0 }
+    currentURL = urls[urlIndex]
+    if debug, urls.count > 1 { print("ws: connecting to", currentURL) }
+    var request = URLRequest(url: currentURL)
     for (key, value) in headers {
       request.setValue(value, forHTTPHeaderField: key)
     }
@@ -280,6 +306,21 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
     self.webSocket = webSocket
     webSocket.resume()
     receiveMessage(webSocket)
+    startOpenTimeout(webSocket)
+  }
+  
+  /// With alternate addresses, an attempt that doesn't open in time gives way to the next address
+  private func startOpenTimeout(_ task: URLSessionWebSocketTask) {
+    openTimeoutTask?.cancel()
+    openTimeoutTask = nil
+    guard urlCount > 1 else { return }
+    let timeout = openTimeout
+    openTimeoutTask = Task { @MainActor [weak self] in
+      try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+      guard !Task.isCancelled, let self, task === self.webSocket, self.connectionState != .connected else { return }
+      if self.debug { print("ws: \(self.currentURL) didn't open in \(timeout) s") }
+      self.connectionLost(task)
+    }
   }
   
   private func receiveMessage(_ task: URLSessionWebSocketTask) {
@@ -331,14 +372,26 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
   /// Closes the current connection, fails pending calls that can't be replayed and schedules a reconnect
   func connectionLost(_ task: URLSessionWebSocketTask?) {
     guard let task, task === webSocket else { return }
+    let opened = connectionState == .connected
     webSocket = nil
     task.cancel(with: .goingAway, reason: nil)
     stopPing()
+    openTimeoutTask?.cancel()
+    openTimeoutTask = nil
     messageQueue.removeAll()
     isWaiting = 0
     connectionState = .disconnected
     for entry in pending.dropped() {
       entry.fail?(.disconnected)
+    }
+    // An attempt that never opened moves on to the next address at once; after the last one, the backoff
+    if !opened && urlCount > 1 {
+      urlIndex += 1
+      if urlIndex < urlCount, isRunning {
+        start()
+        return
+      }
+      urlIndex = 0
     }
     scheduleReconnect()
   }
@@ -357,6 +410,8 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
     webSocket = nil
     task.cancel(with: .goingAway, reason: nil)
     stopPing()
+    openTimeoutTask?.cancel()
+    openTimeoutTask = nil
     messageQueue.removeAll()
     isWaiting = 0
     connectionState = .disconnected
@@ -435,6 +490,8 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
     reconnectTask = nil
     stopPing()
     stopPathMonitor()
+    openTimeoutTask?.cancel()
+    openTimeoutTask = nil
     let task = webSocket
     webSocket = nil
     task?.cancel(with: .goingAway, reason: nil)
@@ -634,6 +691,8 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
     defer { lastPath = path }
     guard let lastPath, lastPath != path, path.isSatisfied else { return }
     if debug { print("ws: network changed") }
+    // A new network may reach `url` again
+    if connectionState != .connected { urlIndex = 0 }
     reconnectNow()
   }
   
@@ -642,6 +701,8 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
   nonisolated public func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didOpenWithProtocol protocol: String?) {
     Task { @MainActor in
       guard webSocketTask === webSocket else { return }
+      openTimeoutTask?.cancel()
+      openTimeoutTask = nil
       attempts = 0
       refusal = nil
       connectionState = .connected
