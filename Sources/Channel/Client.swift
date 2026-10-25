@@ -309,11 +309,12 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
     startOpenTimeout(webSocket)
   }
   
-  /// With alternate addresses, an attempt that doesn't open in time gives way to the next address
+  /// With alternate addresses, an attempt that doesn't open in time gives way to the next address. Also while there
+  /// are none yet: the next attempt asks for them again (one that hangs would wait out URLSession's 60 s instead)
   private func startOpenTimeout(_ task: URLSessionWebSocketTask) {
     openTimeoutTask?.cancel()
     openTimeoutTask = nil
-    guard urlCount > 1 else { return }
+    guard urlCount > 1 || alternateURLs != nil else { return }
     let timeout = openTimeout
     openTimeoutTask = Task { @MainActor [weak self] in
       try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))

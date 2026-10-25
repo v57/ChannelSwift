@@ -458,6 +458,23 @@ struct WireV2Tests {
     let _: String = try await client.send("hello")
   }
 
+  @Test("an alternate that shows up after a hanging attempt is tried next")
+  func alternateShowsUpLater() async throws {
+    await Fixture.start()
+    let silent = try SilentListener()
+    defer { silent.close() }
+    let fixture = URL(string: "ws://127.0.0.1:\(Fixture.port)")!
+    let started = Date()
+    let client = Channel<Void>().connect(
+      URL(string: "ws://127.0.0.1:\(silent.port)")!,
+      // None at first, as when the tunnel that carries it is still coming up
+      options: ClientOptions(alternateURLs: { Date().timeIntervalSince(started) > 0.2 ? [fixture] : [] }, openTimeout: 0.3)
+    )
+    defer { client.stop() }
+    #expect(await waitUntil(3) { client.connectionState == .connected })
+    #expect(client.ws.currentURL == fixture)
+  }
+
   @Test("without alternates the address and backoff stay as they were")
   func noAlternates() async throws {
     let url = URL(string: "ws://127.0.0.1:\(closedPort())")!
