@@ -193,8 +193,8 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
   /// Addresses the last attempt chose from
   private var urlCount = 1
   private var openTimeoutTask: Task<Void, Never>?
-  private var webSocket: URLSessionWebSocketTask?
-  var currentTask: URLSessionWebSocketTask? { webSocket }
+  private var webSocket: (any WebSocketTask)?
+  var currentTask: (any WebSocketTask)? { webSocket }
   /// Created on the first connection attempt and invalidated by `stop()`, since a session keeps its delegate alive
   private var session: URLSession?
   
@@ -299,10 +299,24 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
     for (key, value) in headers {
       request.setValue(value, forHTTPHeaderField: key)
     }
-    let session = self.session ?? URLSession(configuration: .default, delegate: self, delegateQueue: nil)
-    self.session = session
-    let webSocket = session.webSocketTask(with: request)
-    webSocket.maximumMessageSize = maximumMessageSize
+    let webSocket: any WebSocketTask
+    if SocketWebSocketTask.isNeeded(for: currentURL) {
+      // URLSession can't (Linux's libcurl without WebSockets): the same protocol on a socket
+      let task = SocketWebSocketTask(request: request, maximumMessageSize: maximumMessageSize)
+      task.onOpen = { [weak self, weak task] in
+        Task { @MainActor in if let self, let task { self.opened(task) } }
+      }
+      task.onClose = { [weak self, weak task] in
+        Task { @MainActor in if let self, let task { self.connectionLost(task) } }
+      }
+      webSocket = task
+    } else {
+      let session = self.session ?? URLSession(configuration: .default, delegate: self, delegateQueue: nil)
+      self.session = session
+      let task = session.webSocketTask(with: request)
+      task.maximumMessageSize = maximumMessageSize
+      webSocket = task
+    }
     self.webSocket = webSocket
     webSocket.resume()
     receiveMessage(webSocket)
@@ -311,7 +325,7 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
   
   /// With alternate addresses, an attempt that doesn't open in time gives way to the next address. Also while there
   /// are none yet: the next attempt asks for them again (one that hangs would wait out URLSession's 60 s instead)
-  private func startOpenTimeout(_ task: URLSessionWebSocketTask) {
+  private func startOpenTimeout(_ task: any WebSocketTask) {
     openTimeoutTask?.cancel()
     openTimeoutTask = nil
     guard urlCount > 1 || alternateURLs != nil else { return }
@@ -324,7 +338,7 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
     }
   }
   
-  private func receiveMessage(_ task: URLSessionWebSocketTask) {
+  private func receiveMessage(_ task: any WebSocketTask) {
     task.receive { [weak self] result in
       guard let self else { return }
       Task { @MainActor in
@@ -348,7 +362,7 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
     }
   }
   
-  func received(text: String, from task: URLSessionWebSocketTask?) {
+  func received(text: String, from task: (any WebSocketTask)?) {
     let data = Data(text.utf8)
     if debug { print("ws:", text) }
     decoderQueue.async {
@@ -371,7 +385,7 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
   }
   
   /// Closes the current connection, fails pending calls that can't be replayed and schedules a reconnect
-  func connectionLost(_ task: URLSessionWebSocketTask?) {
+  func connectionLost(_ task: (any WebSocketTask)?) {
     guard let task, task === webSocket else { return }
     let opened = connectionState == .connected
     webSocket = nil
@@ -398,7 +412,7 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
   }
   
   /// An upgrade the server answered with an HTTP client error (`4xx`) instead of `101`
-  static func refusal(of task: URLSessionWebSocketTask, opened: Bool) -> ConnectionRefusal? {
+  static func refusal(of task: any WebSocketTask, opened: Bool) -> ConnectionRefusal? {
     guard !opened, let response = task.response as? HTTPURLResponse,
           (400..<500).contains(response.statusCode) else { return nil }
     return ConnectionRefusal(statusCode: response.statusCode)
@@ -406,7 +420,7 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
 
   /// The server refused the connection: fails the posts, keeps subscriptions and streams, and tries again after
   /// `refusedRetryDelay` instead of the usual backoff
-  func refused(_ task: URLSessionWebSocketTask?, _ refusal: ConnectionRefusal) {
+  func refused(_ task: (any WebSocketTask)?, _ refusal: ConnectionRefusal) {
     guard let task, task === webSocket else { return }
     webSocket = nil
     task.cancel(with: .goingAway, reason: nil)
@@ -641,7 +655,7 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
   }
   
   /// Sends a ping. With no pong within `pongTimeout`, the connection is closed and reconnects.
-  private func ping(_ task: URLSessionWebSocketTask) {
+  private func ping(_ task: any WebSocketTask) {
     guard pongTask == nil else { return }
     let timeout = pongTimeout
     pongTask = Task { @MainActor [weak self] in
@@ -701,20 +715,25 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
   
   nonisolated public func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didOpenWithProtocol protocol: String?) {
     Task { @MainActor in
-      guard webSocketTask === webSocket else { return }
-      openTimeoutTask?.cancel()
-      openTimeoutTask = nil
-      attempts = 0
-      refusal = nil
-      connectionState = .connected
-      // Unanswered requests go out again in their original order
-      let bodies = pending.flush()
-      if !bodies.isEmpty {
-        trySend(bodies)
-      }
-      startPing()
-      onOpen?()
+      opened(webSocketTask)
     }
+  }
+
+  /// The upgrade succeeded: the connection is open
+  private func opened(_ task: any WebSocketTask) {
+    guard task === webSocket else { return }
+    openTimeoutTask?.cancel()
+    openTimeoutTask = nil
+    attempts = 0
+    refusal = nil
+    connectionState = .connected
+    // Unanswered requests go out again in their original order
+    let bodies = pending.flush()
+    if !bodies.isEmpty {
+      trySend(bodies)
+    }
+    startPing()
+    onOpen?()
   }
   
   nonisolated public func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didCloseWith closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
