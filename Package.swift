@@ -15,3 +15,12 @@ let package = Package(
     .testTarget(name: "ChannelTests", dependencies: ["Channel"])
   ]
 )
+
+#if os(Linux)
+// wss:// on Linux: SocketWebSocketTask's TLS through OpenSSL (apt install libssl-dev), since URLSession's WebSocket
+// task needs a libcurl built with WebSockets.
+package.targets.append(.systemLibrary(name: "COpenSSL", pkgConfig: "openssl", providers: [.apt(["libssl-dev"])]))
+for target in package.targets where target.name == name {
+  target.dependencies.append("COpenSSL")
+}
+#endif

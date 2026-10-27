@@ -4,7 +4,7 @@
 //
 //  One WebSocket connection attempt of a WebSocketClient: URLSession's task where URLSession speaks WebSocket, and
 //  SocketWebSocketTask where it can't (swift-corelibs-foundation on a libcurl built without WebSockets, as Ubuntu
-//  24.04's 8.5 is: "WebSockets not supported by libcurl").
+//  24.04's 8.5 is: "WebSockets not supported by libcurl"), with TLSSocket for wss:// where OpenSSL is linked.
 //
 
 import Foundation
@@ -31,13 +31,17 @@ protocol WebSocketTask: AnyObject, Sendable {
 extension URLSessionWebSocketTask: WebSocketTask {}
 
 #if canImport(Darwin) || canImport(Glibc)
-/// The WebSocket protocol (RFC 6455) over a TCP socket, for `ws://` addresses: a thread per connection connects, sends
-/// the upgrade request, then reads frames. `wss://` stays with URLSession.
+/// The WebSocket protocol (RFC 6455) over a TCP socket, for `ws://` addresses and, through TLSSocket (OpenSSL),
+/// `wss://`: a thread per connection connects, sends the upgrade request, checks the server's Sec-WebSocket-Accept,
+/// then reads frames.
 final class SocketWebSocketTask: WebSocketTask, @unchecked Sendable {
-  /// Whether `url` needs this task instead of URLSession's: plain `ws://` off Apple platforms
+  /// Whether `url` needs this task instead of URLSession's: `ws://` off Apple platforms, and `wss://` where OpenSSL is
+  /// linked (Linux)
   static func isNeeded(for url: URL) -> Bool {
     #if canImport(Darwin)
     false
+    #elseif canImport(COpenSSL)
+    ["ws", "wss"].contains(url.scheme?.lowercased())
     #else
     url.scheme?.lowercased() == "ws"
     #endif
@@ -58,6 +62,10 @@ final class SocketWebSocketTask: WebSocketTask, @unchecked Sendable {
   private let lock = NSLock()
   private let writeLock = NSLock()
   private var descriptor: Int32 = -1
+  #if canImport(COpenSSL)
+  /// The TLS session of a `wss://` connection
+  private var tls: TLSSocket?
+  #endif
   private var isOpen = false
   private var isFinished = false
   private var _response: URLResponse?
@@ -125,7 +133,8 @@ final class SocketWebSocketTask: WebSocketTask, @unchecked Sendable {
   private func run() {
     do {
       guard let url = request.url, let host = url.host else { throw Failure("invalid url") }
-      let socket = try Self.connect(host: host, port: url.port ?? 80)
+      let secure = url.scheme?.lowercased() == "wss"
+      let socket = try Self.connect(host: host, port: url.port ?? (secure ? 443 : 80))
       lock.lock()
       if isFinished {
         lock.unlock()
@@ -134,6 +143,14 @@ final class SocketWebSocketTask: WebSocketTask, @unchecked Sendable {
       }
       descriptor = socket
       lock.unlock()
+      if secure {
+        #if canImport(COpenSSL)
+        let tls = try TLSSocket(socket: socket, host: host)
+        lock.withLock { self.tls = tls }
+        #else
+        throw Failure("wss:// needs TLS, which this build lacks")
+        #endif
+      }
       var buffer = try handshake(url: url, host: host)
       lock.withLock { isOpen = true }
       onOpen?()
@@ -205,6 +222,9 @@ final class SocketWebSocketTask: WebSocketTask, @unchecked Sendable {
     }
     lock.withLock { _response = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: fields) }
     guard status == 101 else { throw Failure("upgrade refused with HTTP \(status)") }
+    // The server proves it read this request (RFC 6455 4.1): base64(SHA-1(key + the protocol's GUID))
+    let accept = fields.first { $0.key.lowercased() == "sec-websocket-accept" }?.value
+    guard accept == Self.acceptValue(for: key) else { throw Failure("the server's Sec-WebSocket-Accept doesn't match") }
     return Data(buffer[range.upperBound...])
   }
 
@@ -312,6 +332,14 @@ final class SocketWebSocketTask: WebSocketTask, @unchecked Sendable {
     let socket = lock.withLock { descriptor }
     guard socket >= 0 else { throw Failure("closed") }
     var chunk = [UInt8](repeating: 0, count: 64 * 1024)
+    #if canImport(COpenSSL)
+    if let tls = lock.withLock({ tls }) {
+      let count = try chunk.withUnsafeMutableBytes { try tls.read(into: $0) }
+      guard count > 0 else { throw Failure("connection closed") }
+      buffer.append(contentsOf: chunk[0..<count])
+      return
+    }
+    #endif
     while true {
       let count = chunk.withUnsafeMutableBytes { recv(socket, $0.baseAddress, $0.count, 0) }
       if count > 0 {
@@ -351,6 +379,9 @@ final class SocketWebSocketTask: WebSocketTask, @unchecked Sendable {
     defer { writeLock.unlock() }
     let socket = lock.withLock { descriptor }
     guard socket >= 0 else { throw Failure("not connected") }
+    #if canImport(COpenSSL)
+    if let tls = lock.withLock({ tls }) { return try tls.write(data) }
+    #endif
     #if canImport(Glibc)
     let flags = Int32(MSG_NOSIGNAL)
     #else
@@ -365,6 +396,48 @@ final class SocketWebSocketTask: WebSocketTask, @unchecked Sendable {
         sent += count
       }
     }
+  }
+}
+
+extension SocketWebSocketTask {
+  /// The Sec-WebSocket-Accept a server answers `key` with: base64(SHA-1(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
+  static func acceptValue(for key: String) -> String {
+    Data(sha1(Array((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").utf8))).base64EncodedString()
+  }
+
+  /// SHA-1 (FIPS 180-4), only for the handshake's check: Foundation has no digests off Apple platforms
+  static func sha1(_ message: [UInt8]) -> [UInt8] {
+    var h: [UInt32] = [0x6745_2301, 0xEFCD_AB89, 0x98BA_DCFE, 0x1032_5476, 0xC3D2_E1F0]
+    var bytes = message
+    bytes.append(0x80)
+    while bytes.count % 64 != 56 { bytes.append(0) }
+    let bits = UInt64(message.count) * 8
+    bytes.append(contentsOf: (0..<8).reversed().map { UInt8(truncatingIfNeeded: bits >> ($0 * 8)) })
+    var w = [UInt32](repeating: 0, count: 80)
+    for chunk in stride(from: 0, to: bytes.count, by: 64) {
+      for i in 0..<16 {
+        let j = chunk + i * 4
+        w[i] = UInt32(bytes[j]) << 24 | UInt32(bytes[j + 1]) << 16 | UInt32(bytes[j + 2]) << 8 | UInt32(bytes[j + 3])
+      }
+      for i in 16..<80 {
+        let x = w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]
+        w[i] = x << 1 | x >> 31
+      }
+      var (a, b, c, d, e) = (h[0], h[1], h[2], h[3], h[4])
+      for i in 0..<80 {
+        let (f, k): (UInt32, UInt32) =
+          switch i {
+          case 0..<20: (b & c | ~b & d, 0x5A82_7999)
+          case 20..<40: (b ^ c ^ d, 0x6ED9_EBA1)
+          case 40..<60: (b & c | b & d | c & d, 0x8F1B_BCDC)
+          default: (b ^ c ^ d, 0xCA62_C1D6)
+          }
+        let t = (a << 5 | a >> 27) &+ f &+ e &+ k &+ w[i]
+        (e, d, c, b, a) = (d, c, b << 30 | b >> 2, a, t)
+      }
+      h[0] &+= a; h[1] &+= b; h[2] &+= c; h[3] &+= d; h[4] &+= e
+    }
+    return h.flatMap { value in (0..<4).reversed().map { UInt8(truncatingIfNeeded: value >> ($0 * 8)) } }
   }
 }
 
