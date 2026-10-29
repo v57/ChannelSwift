@@ -53,6 +53,31 @@ client.ws.isConnectedChanged = { isConnected in } // the old single callback sti
 A text frame that isn't JSON closes the connection and reconnects, replayable calls survive it. Binary frames are
 ignored.
 
+## QUIC (experimental)
+
+`quic://` addresses use Channel's QUIC transport (`channel/docs/quic.md` in the TypeScript reference): the same
+messages over one QUIC stream, TLS always on. It runs on Network.framework, so it needs macOS 12, iOS 15, tvOS 15 or
+watchOS 8; elsewhere (Linux, older systems) a `quic://` address doesn't connect, and WebSocket stays the transport.
+Both come with the system, so there is no dependency to add.
+
+```swift
+let client = Channel<Void>().connect(URL(string: "quic://example.com:4433")!, options: ClientOptions(
+  quic: QUICOptions(ca: try Data(contentsOf: certURL)) // or fingerprint: "DD:D2:…", serverName: "example.com"
+))
+```
+
+- Without `ca` or `fingerprint` the server certificate must be trusted by the system. `fingerprint` (SHA-256, hex,
+  colons optional) accepts only that certificate and skips the other checks.
+- Apple's TLS checks a certificate given as `ca` like any server certificate: at most 825 days of validity, the
+  `serverAuth` extended key usage, and the address in its subject alternative names. A self-signed one for local use:
+  `openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout key.pem -out cert.pem -days 365
+  -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" -addext "extendedKeyUsage=serverAuth"`
+  (OpenSSL 3; macOS's LibreSSL needs `-newkey rsa:2048`). Pinning has none of these limits.
+- Headers go in the connection's first frame, pings are empty frames (keepalives), and reconnects, replay, alternate
+  addresses and timeouts work as over WebSocket. A network change reconnects too, like WebSocket; QUIC's connection
+  migration isn't used yet.
+- No 0-RTT, since a replayed early request could run twice.
+
 ## Request options
 
 ```swift
@@ -116,4 +141,6 @@ swift test
 
 The old tests need the TS reference fixture on port 2049 (`bun tests/server.ts` in `channel/`). The wire v2 tests start
 `Tests/Fixture/server.ts`, a raw Bun fixture with the same routes, on port 2051. To run them against the TS reference,
-set `CHANNEL_FIXTURE_PORT=2049`.
+set `CHANNEL_FIXTURE_PORT=2049`. The QUIC tests start the TS reference fixture next to this checkout
+(`../channel/tests/server.ts`, through `Tests/Fixture/quic-server.ts`) on 2053 and 2054, with a certificate they make
+with `/usr/bin/openssl`.

@@ -25,7 +25,7 @@ public extension Channel {
   }
   func connect(_ url: URL, state: State, options: ClientOptions<State> = ClientOptions()) -> ClientSender<State> {
     let ch = self
-    let ws = WebSocketClient(url: url, headers: options.headers, requestTimeout: options.requestTimeout, pingInterval: options.pingInterval, maximumMessageSize: options.maximumMessageSize, reconnectOnNetworkChange: options.reconnectOnNetworkChange, alternateURLs: options.alternateURLs, openTimeout: options.openTimeout)
+    let ws = WebSocketClient(url: url, headers: options.headers, requestTimeout: options.requestTimeout, pingInterval: options.pingInterval, maximumMessageSize: options.maximumMessageSize, reconnectOnNetworkChange: options.reconnectOnNetworkChange, alternateURLs: options.alternateURLs, openTimeout: options.openTimeout, quic: options.quic)
     let topics = UnsafeMutable(Set<String>())
     let sender = ChannelSender(ch: ch, connection: ws)
     
@@ -93,8 +93,10 @@ public struct ClientOptions<State: Sendable> {
   public var alternateURLs: (@MainActor () async -> [URL])?
   /// Seconds an attempt may take to open while there are alternate addresses
   public var openTimeout: TimeInterval
+  /// Certificate trust for `quic://` addresses
+  public var quic: QUICOptions
   
-  public init(headers: (@MainActor () async -> [String: String])? = nil, onConnect: (@Sendable (ChannelSender<State>) async throws -> Void)? = nil, requestTimeout: TimeInterval? = nil, pingInterval: TimeInterval = 15, maximumMessageSize: Int = 16 << 20, reconnectOnNetworkChange: Bool = true, alternateURLs: (@MainActor () async -> [URL])? = nil, openTimeout: TimeInterval = 5) {
+  public init(headers: (@MainActor () async -> [String: String])? = nil, onConnect: (@Sendable (ChannelSender<State>) async throws -> Void)? = nil, requestTimeout: TimeInterval? = nil, pingInterval: TimeInterval = 15, maximumMessageSize: Int = 16 << 20, reconnectOnNetworkChange: Bool = true, alternateURLs: (@MainActor () async -> [URL])? = nil, openTimeout: TimeInterval = 5, quic: QUICOptions = QUICOptions()) {
     self.headers = headers
     self.onConnect = onConnect
     self.requestTimeout = requestTimeout
@@ -103,6 +105,7 @@ public struct ClientOptions<State: Sendable> {
     self.reconnectOnNetworkChange = reconnectOnNetworkChange
     self.alternateURLs = alternateURLs
     self.openTimeout = openTimeout
+    self.quic = quic
   }
 }
 
@@ -239,6 +242,8 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
   var pongTimeout: TimeInterval = 10
   /// Largest incoming message in bytes
   public var maximumMessageSize: Int
+  /// Certificate trust for `quic://` addresses
+  public let quic: QUICOptions
   /// Whether the client reconnects after drops. `stop()` turns it off, `start()` back on.
   public private(set) var isRunning = true
   /// Failed connection attempts since the last open, drives the reconnect backoff
@@ -254,8 +259,9 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
   private let decoderQueue = DispatchQueue(label: "decoder")
   private let encoderQueue = DispatchQueue(label: "encoder")
   
-  public init(url: URL, headers: (@MainActor () async -> [String: String])? = nil, requestTimeout: TimeInterval? = nil, pingInterval: TimeInterval = 15, maximumMessageSize: Int = 16 << 20, reconnectOnNetworkChange: Bool = true, alternateURLs: (@MainActor () async -> [URL])? = nil, openTimeout: TimeInterval = 5) {
+  public init(url: URL, headers: (@MainActor () async -> [String: String])? = nil, requestTimeout: TimeInterval? = nil, pingInterval: TimeInterval = 15, maximumMessageSize: Int = 16 << 20, reconnectOnNetworkChange: Bool = true, alternateURLs: (@MainActor () async -> [URL])? = nil, openTimeout: TimeInterval = 5, quic: QUICOptions = QUICOptions()) {
     self.url = url
+    self.quic = quic
     currentURL = url
     self.alternateURLs = alternateURLs
     self.openTimeout = openTimeout
@@ -300,7 +306,9 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
       request.setValue(value, forHTTPHeaderField: key)
     }
     let webSocket: any WebSocketTask
-    if SocketWebSocketTask.isNeeded(for: currentURL) {
+    if currentURL.scheme?.lowercased() == "quic" {
+      webSocket = quicTask(request)
+    } else if SocketWebSocketTask.isNeeded(for: currentURL) {
       // URLSession can't (Linux's libcurl without WebSockets): the same protocol on a socket
       let task = SocketWebSocketTask(request: request, maximumMessageSize: maximumMessageSize)
       task.onOpen = { [weak self, weak task] in
@@ -321,6 +329,23 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
     webSocket.resume()
     receiveMessage(webSocket)
     startOpenTimeout(webSocket)
+  }
+  
+  /// Channel's QUIC transport for `quic://` addresses, where Network.framework has QUIC
+  private func quicTask(_ request: URLRequest) -> any WebSocketTask {
+    #if canImport(Network)
+    if #available(macOS 12, iOS 15, tvOS 15, watchOS 8, *) {
+      let task = QUICTask(request: request, maximumMessageSize: maximumMessageSize, options: quic)
+      task.onOpen = { [weak self, weak task] in
+        Task { @MainActor in if let self, let task { self.opened(task) } }
+      }
+      task.onClose = { [weak self, weak task] in
+        Task { @MainActor in if let self, let task { self.connectionLost(task) } }
+      }
+      return task
+    }
+    #endif
+    return UnavailableQUICTask()
   }
   
   /// With alternate addresses, an attempt that doesn't open in time gives way to the next address. Also while there

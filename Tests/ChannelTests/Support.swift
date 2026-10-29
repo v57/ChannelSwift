@@ -17,50 +17,7 @@ enum Fixture {
       guard port != 2049 else { return }
       let script = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
         .appendingPathComponent("Fixture/server.ts")
-      let process = Process()
-      let home = FileManager.default.homeDirectoryForCurrentUser.path
-      let bun = ["\(home)/.bun/bin/bun", "/opt/homebrew/bin/bun", "/usr/local/bin/bun"]
-        .first { FileManager.default.isExecutableFile(atPath: $0) }
-      if let bun {
-        process.executableURL = URL(fileURLWithPath: bun)
-        process.arguments = [script.path]
-      } else {
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["bun", script.path]
-      }
-      var environment = ProcessInfo.processInfo.environment
-      environment["CHANNEL_FIXTURE_PORT"] = "\(port)"
-      environment["FIXTURE_PARENT_PID"] = "\(ProcessInfo.processInfo.processIdentifier)"
-      process.environment = environment
-      let output = Pipe()
-      process.standardOutput = output
-      process.standardError = output
-      do {
-        try process.run()
-      } catch {
-        print("fixture: can't start bun:", error)
-        return
-      }
-      // Wait for "listening" or for the process to exit (port already in use: someone else serves it)
-      await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-        let done = UnsafeMutable(false)
-        let lock = NSLock()
-        let finish: @Sendable () -> Void = {
-          lock.lock()
-          defer { lock.unlock() }
-          guard !done.value else { return }
-          done.value = true
-          continuation.resume()
-        }
-        output.fileHandleForReading.readabilityHandler = { handle in
-          let data = handle.availableData
-          if data.isEmpty || String(decoding: data, as: UTF8.self).contains("listening") {
-            handle.readabilityHandler = nil
-            finish()
-          }
-        }
-        process.terminationHandler = { _ in finish() }
-      }
+      await runBun(script, environment: ["CHANNEL_FIXTURE_PORT": "\(port)"])
       #endif
     }
     started = task
@@ -74,6 +31,58 @@ enum Fixture {
     return client
   }
 }
+
+#if os(macOS)
+/// Runs a Bun fixture script until it prints "listening" or exits (its port already in use: someone else serves it).
+/// The fixture exits when the test process does.
+@MainActor
+func runBun(_ script: URL, environment extra: [String: String]) async {
+  let process = Process()
+  let home = FileManager.default.homeDirectoryForCurrentUser.path
+  let bun = ["\(home)/.bun/bin/bun", "/opt/homebrew/bin/bun", "/usr/local/bin/bun"]
+    .first { FileManager.default.isExecutableFile(atPath: $0) }
+  if let bun {
+    process.executableURL = URL(fileURLWithPath: bun)
+    process.arguments = [script.path]
+  } else {
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+    process.arguments = ["bun", script.path]
+  }
+  var environment = ProcessInfo.processInfo.environment
+  environment.merge(extra) { _, new in new }
+  environment["FIXTURE_PARENT_PID"] = "\(ProcessInfo.processInfo.processIdentifier)"
+  process.environment = environment
+  let output = Pipe()
+  process.standardOutput = output
+  process.standardError = output
+  do {
+    try process.run()
+  } catch {
+    print("fixture: can't start bun:", error)
+    return
+  }
+  // Wait for "listening" or for the process to exit (port already in use: someone else serves it)
+  await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+    let done = UnsafeMutable(false)
+    let lock = NSLock()
+    let finish: @Sendable () -> Void = {
+      lock.lock()
+      defer { lock.unlock() }
+      guard !done.value else { return }
+      done.value = true
+      continuation.resume()
+    }
+    output.fileHandleForReading.readabilityHandler = { handle in
+      let data = handle.availableData
+      if data.isEmpty || String(decoding: data, as: UTF8.self).contains("listening") {
+        handle.readabilityHandler = nil
+        finish()
+      }
+    }
+    process.terminationHandler = { _ in finish() }
+  }
+}
+#endif
 
 /// Polls `condition` on the main actor until it holds or `timeout` seconds pass
 @MainActor
