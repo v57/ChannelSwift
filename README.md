@@ -77,6 +77,10 @@ let client = Channel<Void>().connect(URL(string: "quic://example.com:4433")!, op
   addresses and timeouts work as over WebSocket. A network change reconnects too, like WebSocket; QUIC's connection
   migration isn't used yet.
 - No 0-RTT, since a replayed early request could run twice.
+- The server side is HubServer's ChannelServer (`QUICServer`, `Core/HubServer`).
+
+Languages with QUIC: TypeScript, Go, Swift, C#, Rust, Python, Elixir, Java, Kotlin, C and Zig; Dart, Ruby and PHP stay
+on WebSocket (libraries and status in `channel/docs/quic.md`).
 
 ## Request options
 
