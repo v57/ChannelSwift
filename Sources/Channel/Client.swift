@@ -193,6 +193,8 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
   /// Index of the address the next attempt uses, `url` first. It stays on an address that opened, and goes back to
   /// `url` when the network changes while disconnected.
   private var urlIndex = 0
+  /// Set from `headers`: the address this attempt opens, one of `url` and the alternates. The usual turn otherwise.
+  public var nextURL: URL?
   /// Addresses the last attempt chose from
   private var urlCount = 1
   private var openTimeoutTask: Task<Void, Never>?
@@ -299,6 +301,8 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
   private func open(urls: [URL], headers: [String: String]) {
     urlCount = urls.count
     if urlIndex >= urls.count { urlIndex = 0 }
+    if let nextURL, let index = urls.firstIndex(of: nextURL) { urlIndex = index }
+    nextURL = nil
     currentURL = urls[urlIndex]
     if debug, urls.count > 1 { print("ws: connecting to", currentURL) }
     var request = URLRequest(url: currentURL)
@@ -449,6 +453,18 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
     guard let task, task === webSocket else { return }
     webSocket = nil
     task.cancel(with: .goingAway, reason: nil)
+    finishRefused(refusal)
+  }
+
+  /// Refuses the connection from this side while `headers` runs, when it finds the server shouldn't get any: the same as
+  /// a refused upgrade (`refusal`, `onRefused`, posts fail, another try after `refusedRetryDelay`), and nothing is opened
+  public func refuseConnecting(_ refusal: ConnectionRefusal) {
+    guard webSocket == nil else { return }
+    attempt += 1
+    finishRefused(refusal)
+  }
+
+  private func finishRefused(_ refusal: ConnectionRefusal) {
     stopPing()
     openTimeoutTask?.cancel()
     openTimeoutTask = nil

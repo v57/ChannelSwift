@@ -376,6 +376,46 @@ struct WireV2Tests {
     observer.cancel()
   }
 
+  @Test("refusing from headers opens nothing and looks like a refused upgrade")
+  func refusedFromHeaders() async throws {
+    await Fixture.start()
+    let channel = Channel<Void>()
+    final class Holder { var client: ClientSender<Void>? }
+    let holder = Holder()
+    var refusals = [ConnectionRefusal]()
+    let client = channel.connect(URL(string: "ws://127.0.0.1:\(Fixture.port)")!, options: ClientOptions(headers: {
+      holder.client?.ws.refuseConnecting(ConnectionRefusal(statusCode: 0))
+      return [:]
+    }))
+    holder.client = client
+    defer { client.stop() }
+    client.ws.refusedRetryDelay = 60
+    client.ws.onRefused = { refusals.append($0) }
+    #expect(await channelError { let _: String = try await client.send("hello") }?.code == .refused)
+    #expect(refusals == [ConnectionRefusal(statusCode: 0)])
+    #expect(client.connectionState == .disconnected)
+    #expect(!client.ws.isConnected)
+  }
+
+  @Test("nextURL set from headers picks the address of that attempt")
+  func nextURL() async throws {
+    await Fixture.start()
+    let channel = Channel<Void>()
+    final class Holder { var client: ClientSender<Void>? }
+    let holder = Holder()
+    let dead = URL(string: "ws://127.0.0.1:1")!
+    let live = URL(string: "ws://127.0.0.1:\(Fixture.port)")!
+    let client = channel.connect(dead, options: ClientOptions(headers: {
+      holder.client?.ws.nextURL = live
+      return [:]
+    }, alternateURLs: { [live] }))
+    holder.client = client
+    defer { client.stop() }
+    let answer: String = try await client.send("hello")
+    #expect(!answer.isEmpty)
+    #expect(client.ws.currentURL == live)
+  }
+
   @Test("a refused upgrade fails posts at once, keeps streams and backs off")
   func refused() async throws {
     await Fixture.start()
