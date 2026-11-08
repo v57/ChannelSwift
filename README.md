@@ -5,6 +5,18 @@
 
 Powerful and lightweight communication built for modern language. Websocket client included. Works on the latest async/await model with AsyncIteratorProtocol support for streaming data
 
+# Libraries
+
+The Swift port of [Channel](https://github.com/v57/channel) (the TypeScript library is the protocol's reference;
+other languages in its [ports.md](https://github.com/v57/channel/blob/main/docs/ports.md)).
+
+| Library | Purpose | Platforms | Import |
+| --- | --- | --- | --- |
+| [`Channel`](docs/ChannelSwift.md) | Channel client over WebSocket and QUIC: requests, streams, subscriptions, reconnect; handlers for calls from the server | macOS 10.15+, iOS 13+, tvOS 13+, watchOS 6+, visionOS 1+; Linux; QUIC on Apple platforms only | `.package(url: "https://github.com/v57/ChannelSwift.git", branch: "main")`, product `Channel`, `import Channel` |
+
+`Benchmark` and `MemoryBenchmark` are development executables, and `COpenSSL` (Linux only) is the internal OpenSSL
+module behind `wss://` there. The Swift server is `ChannelServer` in [HubServer](https://github.com/v57/HubServer).
+
 # Usage
 
 ```swift
