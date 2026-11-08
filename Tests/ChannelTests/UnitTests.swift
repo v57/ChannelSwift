@@ -381,6 +381,51 @@ struct UnitTests {
     #expect(WebSocketClient.reconnectDelay(attempts: 1000, random: 0) == 2.5)
   }
 
+  @Test("a response from another connection answers no call, stream or subscription")
+  func replyOrigin() async throws {
+    // One channel, two connections (like a client connected to two servers): ids are one counter for both
+    let h = Harness()
+    let other = FakeConnection()
+    let otherSender = ChannelSender(ch: h.channel, connection: other)
+    func forge(_ make: (Int) -> String) {
+      let text = "[" + (0..<256).map(make).joined(separator: ",") + "]"
+      let messages = try! JSONDecoder.iso8601.decode(DecodableArray<ReceivedResponse>.self, from: Data(text.utf8)).array
+      h.channel.receive(messages, controller: FakeController(connection: other, sender: otherSender))
+    }
+    let call = Task { () -> String in try await h.sender.send("svc/read") }
+    let stream = Task { @MainActor in
+      var values = [String]()
+      for try await value in h.sender.values("svc/values", as: String.self) {
+        values.append(value)
+      }
+      return values
+    }
+    let events = Events()
+    let sub = Task { try await h.sender.subscribe("room", event: events.handler) }
+    await h.requests(3)
+    func id(of needle: String) -> Int {
+      let json = h.connection.requests.first { $0.contains(needle) }!
+      let digits = json.split(separator: #""id":"#)[1].prefix { $0.isNumber }
+      return Int(digits)!
+    }
+    let (callId, streamId, subId) = (id(of: #""path":"svc\/read""#), id(of: #""stream":"svc\/values""#), id(of: #""sub":"room""#))
+
+    forge { #"{"id":\#($0),"body":"forged"}"# }
+    forge { #"{"id":\#($0),"topic":"x","body":"forged"}"# }
+    forge { #"{"id":\#($0),"error":"forged"}"# }
+    forge { #"{"id":\#($0),"done":true}"# }
+    #expect(h.channel.requests.count == 3)
+    #expect(events.values.isEmpty)
+
+    h.receive(#"[{"id":\#(callId),"body":"real"},{"id":\#(streamId),"body":"real"},{"id":\#(streamId),"done":true},{"id":\#(subId),"topic":"room","body":"real"}]"#)
+    #expect(try await call.value == "real")
+    #expect(try await stream.value == ["real"])
+    let token = try await sub.value
+    #expect(token.topic == "room")
+    #expect(events.values == [.string("real")])
+    token.cancel()
+  }
+
   @Test("ChannelError keeps text and description")
   func channelErrorText() {
     let error = ChannelError(text: "banned", code: 403)

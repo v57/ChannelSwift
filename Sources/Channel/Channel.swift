@@ -298,10 +298,19 @@ public struct ChannelError: Error, CustomStringConvertible, Codable, Sendable {
 public struct PendingRequest: Sendable {
   public let request: Encodable & Sendable
   public let onResponse: @Sendable @MainActor (ReceivedResponse) -> Void
-  public init(request: Encodable & Sendable, response: @escaping @Sendable @MainActor (ReceivedResponse) -> Void) {
+  /// The connection the request went to. Only a response arriving on it answers the request.
+  public let connection: ObjectIdentifier?
+  public init(request: Encodable & Sendable, connection: ConnectionInterface? = nil, response: @escaping @Sendable @MainActor (ReceivedResponse) -> Void) {
     self.request = request
+    self.connection = connectionIdentity(connection)
     self.onResponse = response
   }
+}
+
+/// The identity a response's connection is matched by: the connection object itself
+func connectionIdentity(_ connection: ConnectionInterface?) -> ObjectIdentifier? {
+  guard let connection, type(of: connection) is AnyClass else { return nil }
+  return ObjectIdentifier(connection as AnyObject)
 }
 
 // MARK: - Channel
@@ -403,29 +412,29 @@ public class Channel<State: Sendable>: @unchecked Sendable {
     return self
   }
   
-  public func makeRequest<Body: Encodable, Context: Encodable>(_ path: String, _ body: Body?, _ options: SendOptions<Context>?, response: @escaping @Sendable @MainActor (ReceivedResponse) -> Void) -> Request<Body, Context> {
+  public func makeRequest<Body: Encodable, Context: Encodable>(_ path: String, _ body: Body?, _ options: SendOptions<Context>?, connection: ConnectionInterface? = nil, response: @escaping @Sendable @MainActor (ReceivedResponse) -> Void) -> Request<Body, Context> {
     let id = self.id
     self.id += 1
     let request = Request(id: id, path: path, body: body, context: options?.context)
-    let pending = PendingRequest(request: request, response: response)
+    let pending = PendingRequest(request: request, connection: connection, response: response)
     self.requests[id] = pending
     return request
   }
   
-  public func makeStream<Body: Encodable, Context: Encodable>(_ stream: String, _ body: Body?, _ options: SendOptions<Context>?, response: @escaping @Sendable @MainActor (ReceivedResponse) -> Void) -> StreamRequest<Body, Context> {
+  public func makeStream<Body: Encodable, Context: Encodable>(_ stream: String, _ body: Body?, _ options: SendOptions<Context>?, connection: ConnectionInterface? = nil, response: @escaping @Sendable @MainActor (ReceivedResponse) -> Void) -> StreamRequest<Body, Context> {
     let id = self.id
     self.id += 1
     let request = StreamRequest(id: id, stream: stream, body: body, context: options?.context)
-    let pending = PendingRequest(request: request, response: response)
+    let pending = PendingRequest(request: request, connection: connection, response: response)
     self.requests[id] = pending
     return request
   }
   
-  public func makeSubscription<Body: Encodable, Context: Encodable>(_ sub: String, _ body: Body?, _ options: SendOptions<Context>?, response: @escaping @Sendable @MainActor (ReceivedResponse) -> Void) -> SubscriptionRequest<Body, Context> {
+  public func makeSubscription<Body: Encodable, Context: Encodable>(_ sub: String, _ body: Body?, _ options: SendOptions<Context>?, connection: ConnectionInterface? = nil, response: @escaping @Sendable @MainActor (ReceivedResponse) -> Void) -> SubscriptionRequest<Body, Context> {
     let id = self.id
     self.id += 1
     let request = SubscriptionRequest(id: id, sub: sub, body: body, context: options?.context)
-    let pending = PendingRequest(request: request, response: response)
+    let pending = PendingRequest(request: request, connection: connection, response: response)
     self.requests[id] = pending
     return request
   }
@@ -519,6 +528,11 @@ public class Channel<State: Sendable>: @unchecked Sendable {
       controller.unsubscribe(unsub)
     } else if let id = some.id {
       guard let request = self.requests[id] else { return }
+      // A response answers a request only on the connection it went to. Ids are one counter for every connection,
+      // so a channel connected to several servers would otherwise take one server's answers to another's calls.
+      if let expected = request.connection, expected != (controller.sender as? ConnectionSender).flatMap({ connectionIdentity($0.connectionInterface) }) {
+        return
+      }
       // Subscriptions stay while active, so a resubscribe after a reconnect finds its handler
       if !(request.request is SubscriptionRequestProtocol) && !((request.request is StreamRequestProtocol) && (some.done != true) && some.error == nil) {
         self.requests[id] = nil
@@ -643,10 +657,16 @@ public extension Sender {
     try await subscribe(path, Optional<EmptyCodable>.none, options: Optional<SendOptions<EmptyCodable>>.none, event: event)
   }
 }
+/// A sender bound to one connection, so a response can be matched to the connection its request went to
 @MainActor
-public struct ChannelSender<State: Sendable>: Sender, @unchecked Sendable {
+protocol ConnectionSender {
+  var connectionInterface: ConnectionInterface { get }
+}
+@MainActor
+public struct ChannelSender<State: Sendable>: Sender, ConnectionSender, @unchecked Sendable {
   let ch: Channel<State>
   let connection: ConnectionInterface
+  var connectionInterface: ConnectionInterface { connection }
   
   public init(ch: Channel<State>, connection: ConnectionInterface) {
     self.ch = ch
@@ -658,7 +678,7 @@ public struct ChannelSender<State: Sendable>: Sender, @unchecked Sendable {
     let connection = self.connection
     return try await withCheckedThrowingContinuation { continuation in
       let call = PendingCall()
-      let request = ch.makeRequest(path, body, options) { response in
+      let request = ch.makeRequest(path, body, options, connection: connection) { response in
         call.finish(connection)
         if let error = response.channelError {
           continuation.resume(throwing: error)
@@ -693,7 +713,7 @@ public struct ChannelSender<State: Sendable>: Sender, @unchecked Sendable {
     let connection = self.connection
     return try await withCheckedThrowingContinuation { continuation in
       let sub = SubscriptionCall(continuation: continuation)
-      let request = ch.makeSubscription(path, body, options) { response in
+      let request = ch.makeSubscription(path, body, options, connection: connection) { response in
         sub.timer?.cancel()
         sub.timer = nil
         if let error = response.channelError {
@@ -816,7 +836,7 @@ public class ValuesIterator<State: Sendable, Body: Encodable & Sendable, Context
   private func start() {
     if self.isRunning { return }
     self.isRunning = true
-    let request = self.ch.makeStream(path, body, options) { response in
+    let request = self.ch.makeStream(path, body, options, connection: connection) { response in
       self.deliver(Result<Element?, Error> { try response.parseStream() })
     }
     let rid = request.id
