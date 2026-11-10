@@ -381,10 +381,21 @@ public class Channel<State: Sendable>: @unchecked Sendable {
     }
     return self
   }
+  /// A stream that reads only the body: a request with or without a context is taken, like `post(_:request:)`
   public func stream<Input: Decodable & Sendable>(_ path: String, request: @escaping @Sendable (Input, AsyncThrowingStream<Encodable & Sendable, Error>.Continuation) async throws -> Void) -> Self {
-    stream(path) { (body: Body<Input, EmptyCodable, State>, continuation) in
-      try await request(body.body, continuation)
+    streamApi[path] = { body, _ in
+      AsyncThrowingStream { continuation in
+        Task {
+          do {
+            try await request(body.body.body(), continuation)
+            continuation.finish()
+          } catch {
+            continuation.finish(throwing: error)
+          }
+        }
+      }
     }
+    return self
   }
   public func stream(_ path: String, request: @escaping @Sendable (AsyncThrowingStream<Encodable & Sendable, Error>.Continuation) async throws -> Void) -> Self {
     streamApi[path] = { body, _ in

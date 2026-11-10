@@ -11,6 +11,8 @@ final class FakeConnection: ConnectionInterface {
   var requests = [String]()
   /// JSON of every notification (`cancel`, `unsub`)
   var notified = [String]()
+  /// JSON of every response the channel's handlers sent through a `FakeController`
+  var responses = [String]()
   var pending = [Int: RequestOptions]()
   private var nextId = 0
   private var topics = [String: [Int: @MainActor (AnyBody) -> Void]]()
@@ -34,6 +36,9 @@ final class FakeConnection: ConnectionInterface {
   }
   func notify<Body: Encodable>(_ body: Body) {
     notified.append(json(body))
+  }
+  func respond(_ body: Encodable & Sendable) {
+    responses.append(json(AnyEncodable(body: body)))
   }
   func addTopic(topic: String, event: @escaping @MainActor (AnyBody) -> Void) -> @Sendable @MainActor () -> Bool {
     let id = nextTopicId
@@ -76,7 +81,9 @@ private struct FakeController: Controller {
   let connection: FakeConnection
   let sender: any Sender
   var state: Void { () }
-  func respond(_ response: Encodable & Sendable) { }
+  func respond(_ response: Encodable & Sendable) {
+    connection.respond(response)
+  }
   func subscribe(_ topic: String) { }
   func unsubscribe(_ topic: String) { }
   func event(_ topic: String, _ event: AnyBody) {
@@ -119,6 +126,19 @@ struct UnitTests {
     let c = await channelError { try await object.value }
     #expect(c?.text == "nope")
     #expect(c?.code == nil)
+  }
+
+  @Test("a stream that reads only its body takes requests with and without a context")
+  func streamWithoutContext() async throws {
+    let h = Harness()
+    _ = h.channel.stream("count") { (count: Int, continuation: AsyncThrowingStream<Encodable & Sendable, Error>.Continuation) in
+      for value in 0..<count { continuation.yield(value) }
+    }
+    h.receive(#"[{"id":0,"stream":"count","body":2},{"id":1,"stream":"count","body":1,"context":{"key":"k"}}]"#)
+    #expect(await waitUntil { h.connection.responses.filter { $0.contains(#""done":true"#) }.count == 2 })
+    #expect(!h.connection.responses.contains { $0.contains("error") })
+    // Values 0 and 1 for the first, 0 for the second, and a done for each
+    #expect(h.connection.responses.count == 5)
   }
 
   @Test("handlers read the request context, not the body")
