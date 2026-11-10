@@ -61,15 +61,18 @@ public extension Channel {
       ))
     }
     
-    // Connect subscription publishers
-    /*
-    self.eventsApi?.forEach { key, subscription in
-      subscription.publishers.append(SubscriptionPublisher { event in
-        guard topics.contains(event.topic) else { return }
-        ws.send(event)
-      })
+    // What `events` subscriptions publish goes to the server for the topics it subscribed to with `sub`
+    let publishers = ch.attachPublishers(topics: topics) { [weak ws] message in
+      ws?.notify(message)
     }
-    */
+
+    // The server's subscriptions end with the connection. A stopped client publishes nothing more.
+    ws.onDisconnected = { [weak ws] in
+      guard let ws else { return }
+      topics.value.removeAll()
+      if !ws.isRunning { ch.detachPublishers(publishers) }
+      ch._onDisconnect?(state, ChannelSender(ch: ch, connection: ws))
+    }
     return ClientSender(sender: sender, ws: ws)
   }
 }
@@ -232,8 +235,11 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
       for observer in stateObservers.values {
         observer(connectionState)
       }
+      if oldValue == .connected { onDisconnected?() }
     }
   }
+  /// Set by `Channel.connect`: an open connection closed (dropped, refused or stopped)
+  var onDisconnected: (() -> Void)?
   private var stateObservers = [Int: @MainActor (ConnectionState) -> Void]()
   private var nextObserverId = 0
   private var headers: (@MainActor () async -> [String: String])?

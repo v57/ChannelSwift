@@ -21,6 +21,21 @@ private func reconnect(_ client: ClientSender<Void>) async {
 @Suite("wire v2", .serialized)
 @MainActor
 struct WireV2Tests {
+  @Test("onDisconnect runs when an open connection drops and when it stops")
+  func onDisconnect() async throws {
+    await Fixture.start()
+    var disconnects = 0
+    let client = Channel<Void>().onDisconnect { _, _ in disconnects += 1 }.connect(Fixture.port)
+    #expect(await waitUntil { client.connectionState == .connected })
+    #expect(disconnects == 0)
+    await reconnect(client)
+    #expect(disconnects == 1)
+    client.stop()
+    #expect(disconnects == 2)
+    client.stop()
+    #expect(disconnects == 2)
+  }
+
   // 1
   @Test("structured errors carry message, code and info")
   func structuredError() async throws {

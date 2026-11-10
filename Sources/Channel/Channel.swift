@@ -418,6 +418,7 @@ public class Channel<State: Sendable>: @unchecked Sendable {
     return self
   }
   
+  /// Called each time a connection made with `connect` closes after it opened: dropped (it reconnects) or stopped
   public func onDisconnect(_ action: @escaping (State, any Sender) -> Void) -> Self {
     self._onDisconnect = action
     return self
@@ -580,6 +581,9 @@ public class Channel<State: Sendable>: @unchecked Sendable {
     if var e = self.eventsApi {
       if let eventsMap = events as? [String: SubscriptionProtocol] {
         for (key, value) in eventsMap {
+          // The subscription's prefix is its name, as parseSubscription sets it: subscribers get `<name>/<topic>`
+          // and publish must send the same
+          value.prefix = p + key
           e[p + key] = value
         }
         self.eventsApi = e
@@ -589,6 +593,43 @@ public class Channel<State: Sendable>: @unchecked Sendable {
     }
     return self
   }
+
+  /// Sends what `events` subscriptions publish to one connection, for the topics its peer subscribed to (`topics`).
+  /// Answers the publishers, for `detachPublishers` when the connection stops.
+  func attachPublishers(topics: UnsafeMutable<Set<String>>, notify: @escaping @Sendable @MainActor (EventMessage) -> Void) -> [ConnectionPublisher] {
+    guard let eventsApi else { return [] }
+    var attached = [ConnectionPublisher]()
+    for subscription in eventsApi.values {
+      let publisher = ConnectionPublisher { event in
+        let message = EventMessage(topic: event.topic, body: AnyEncodable(body: event.body))
+        onMainActor {
+          guard topics.value.contains(message.topic) else { return }
+          notify(message)
+        }
+      }
+      subscription.publishers.append(publisher)
+      attached.append(publisher)
+    }
+    return attached
+  }
+  func detachPublishers(_ publishers: [ConnectionPublisher]) {
+    for subscription in (eventsApi ?? [:]).values {
+      subscription.publishers.removeAll { publisher in publishers.contains { $0 === publisher as AnyObject } }
+    }
+  }
+}
+
+/// An event on the wire, as the TS channel sends it: `{ topic, body }`
+struct EventMessage: Encodable, Sendable {
+  let topic: String
+  let body: AnyEncodable
+}
+
+/// Publishes a subscription's events to one connection
+final class ConnectionPublisher: EventPublisher, @unchecked Sendable {
+  let send: (SubscriptionEvent) -> Void
+  init(_ send: @escaping (SubscriptionEvent) -> Void) { self.send = send }
+  func publish(_ event: SubscriptionEvent) { send(event) }
 }
 
 // MARK: - Sender

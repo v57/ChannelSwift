@@ -141,6 +141,36 @@ struct UnitTests {
     #expect(h.connection.responses.count == 5)
   }
 
+  @Test("events publish to a connection only the topics its peer subscribed to, until detached")
+  func eventsReachSubscribedTopics() async throws {
+    let rooms = Subscription<String, String>(topic: { $0 }, body: { _ in nil })
+    let channel = Channel<Void>().events(["room": rooms])
+    let topics = UnsafeMutable(Set<String>(["room/a"]))
+    var sent = [String]()
+    let publishers = channel.attachPublishers(topics: topics) { message in
+      sent.append(String(decoding: try! JSONEncoder().encode(message), as: UTF8.self))
+    }
+    rooms.publish("a", body: "hello")
+    rooms.publish("b", body: "not subscribed")
+    #expect(sent.count == 1)
+    #expect(sent.first?.contains(#""body":"hello""#) == true)
+    #expect(sent.first?.replacingOccurrences(of: #"\/"#, with: "/").contains(#""topic":"room/a""#) == true)
+    channel.detachPublishers(publishers)
+    rooms.publish("a", body: "after stop")
+    #expect(sent.count == 1)
+    #expect(rooms.publishers.isEmpty)
+  }
+
+  @Test("a subscription registered by name subscribes and publishes under the same topic")
+  func namedSubscriptionTopic() async throws {
+    let h = Harness()
+    let rooms = Subscription<String, String>(topic: { $0 }, body: { _ in "snapshot" })
+    _ = h.channel.events(["room": rooms])
+    h.receive(#"{"id":0,"sub":"room","body":"a"}"#)
+    #expect(h.connection.responses.count == 1)
+    #expect(h.connection.responses.first?.replacingOccurrences(of: #"\/"#, with: "/").contains(#""topic":"room/a""#) == true)
+  }
+
   @Test("handlers read the request context, not the body")
   func requestContext() async throws {
     struct Caller: Codable, Sendable { var key: String }
