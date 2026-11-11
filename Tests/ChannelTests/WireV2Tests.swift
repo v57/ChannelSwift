@@ -373,6 +373,30 @@ struct WireV2Tests {
     #expect(client.connectionState == .connected)
   }
 
+  @Test("an attempt that started over asks for no headers, so it can't leave the newer attempt without them")
+  func staleAttemptHeaders() async throws {
+    await Fixture.start()
+    final class State { var addressCalls = 0; var evaluation = 0 }
+    let state = State()
+    let client = Channel<Void>().connect(Fixture.port, options: ClientOptions(headers: {
+      // Like HubClient's handshake: a newer evaluation ends an older one, which then has nothing to send
+      state.evaluation += 1
+      let evaluation = state.evaluation
+      await sleep(seconds: 0.3)
+      return evaluation == state.evaluation ? ["x-auth": "yes"] : [:]
+    }, alternateURLs: {
+      // The first attempt's addresses come later than the second's
+      state.addressCalls += 1
+      if state.addressCalls == 1 { await sleep(seconds: 0.15) }
+      return []
+    }))
+    defer { client.stop() }
+    client.reconnectNow()
+    let headers: [String: String] = try await client.send("v2/headers")
+    #expect(headers["x-auth"] == "yes")
+    #expect(state.evaluation == 1)
+  }
+
   @Test("reconnect drops an open connection and connects again with fresh headers")
   func reconnectOpen() async throws {
     let opened = Events()

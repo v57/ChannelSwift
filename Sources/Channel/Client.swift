@@ -295,6 +295,9 @@ public final class WebSocketClient: NSObject, URLSessionWebSocketDelegate, Conne
       let attempt = self.attempt
       Task { @MainActor in
         let urls = [self.url] + (await self.alternateURLs?() ?? [])
+        // An attempt that started over meanwhile asks for no headers: `headers` runs in the order attempts start, so
+        // one that ends an older evaluation (HubClient's handshake) never leaves the newest attempt without its own
+        guard self.attempt == attempt, self.isRunning, self.webSocket == nil else { return }
         let fields = await self.headers?() ?? [:]
         guard self.attempt == attempt, self.isRunning, self.webSocket == nil else { return }
         self.open(urls: urls, headers: fields)
